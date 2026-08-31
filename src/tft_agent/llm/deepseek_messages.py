@@ -5,6 +5,7 @@ from typing import Any
 
 from jsonschema import ValidationError as JSONSchemaValidationError
 from jsonschema import validate
+from pydantic import ValidationError as PydanticValidationError
 
 from tft_agent.agent.state import AgentState
 from tft_agent.core.exceptions import LLMProviderError
@@ -12,10 +13,15 @@ from tft_agent.core.schemas import (
     AgentAction,
     AgentDecision,
     FinalResponse,
+    NumericClaim,
     ToolCall,
     ToolCallRecord,
 )
-from tft_agent.llm.evidence import build_evidence_context, evidence_field_paths
+from tft_agent.llm.evidence import (
+    build_evidence_context,
+    build_evidence_registry,
+    evidence_field_paths,
+)
 from tft_agent.llm.prompts import build_system_prompt
 from tft_agent.llm.tool_adapter import to_function_schema
 from tft_agent.mcp_client.client import MCPToolDefinition
@@ -29,6 +35,7 @@ def build_provider_messages(
 
     question = state.game_state.user_question or state.goal
     evidence = build_evidence_context(state)
+    evidence["evidence_registry"] = build_evidence_registry(state)
     state.trace.grounded_evidence_fields = evidence_field_paths(evidence)
     user_content = question
     messages: list[dict[str, Any]] = [
@@ -120,7 +127,10 @@ def normalize_provider_response(
     if not isinstance(content, str) or not content.strip():
         raise _malformed("DeepSeek response contains neither a tool call nor final content")
     try:
-        payload = json.loads(content)
+        # OpenAI-compatible providers occasionally place literal newlines inside the
+        # answer string. ``strict=False`` tolerates those control characters while
+        # preserving JSON structure and claim validation at our domain boundary.
+        payload = json.loads(content, strict=False)
     except json.JSONDecodeError:
         embedded = _embedded_request_context(content)
         return embedded if embedded is not None else _plain_final(content)
@@ -135,6 +145,21 @@ def normalize_provider_response(
         ):
             raise _malformed("request_context requires a non-empty string array")
         return AgentDecision(action=AgentAction.REQUEST_CONTEXT, missing_context=missing)
+    if "answer" in payload:
+        answer = payload.get("answer")
+        raw_claims = payload.get("numeric_claims")
+        if not isinstance(answer, str) or not answer.strip() or not isinstance(raw_claims, list):
+            raise _malformed("numeric final envelope requires answer and numeric_claims array")
+        try:
+            claims = [NumericClaim.model_validate(item) for item in raw_claims]
+        except PydanticValidationError as exc:
+            raise _malformed("numeric final envelope contains an invalid claim") from exc
+        return AgentDecision(
+            action=AgentAction.FINAL,
+            final_response=FinalResponse(recommendation=answer.strip()),
+            numeric_claims=claims,
+            numeric_claims_declared=True,
+        )
     if payload.get("action") != AgentAction.FINAL.value:
         return _plain_final(content)
     recommendation = payload.get("recommendation")

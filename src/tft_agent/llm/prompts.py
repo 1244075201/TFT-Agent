@@ -6,7 +6,7 @@ from typing import Any
 
 from tft_agent.mcp_client.client import MCPToolDefinition
 
-SYSTEM_PROMPT_VERSION = "v0.2.1"
+SYSTEM_PROMPT_VERSION = "v0.2.2"
 
 SYSTEM_PROMPT = """You are a TFT Decision Agent.
 Use available tools for version-sensitive facts when they can answer reliably, but never call a
@@ -43,8 +43,14 @@ the capabilities listed below. When asked what you can do, distinguish general r
 available external data and do not claim unavailable data sources. Finish when reliable information
 is sufficient, express uncertainty when it is not, and never expose hidden chain-of-thought.
 
-When not making a native tool call, answer with concise visible text. Only when user input is
-required, return the small JSON object {"action":"request_context","missing_context":["..."]}."""
+When making a final answer, return only this small internal envelope:
+{"answer":"concise natural-language answer","numeric_claims":[{"value":35,"unit":"hp",
+"meaning":"current hp","evidence_ref":"game_state.hp"}]}
+Declare every user-visible specific number. Use an empty claims array when the answer has no
+numbers. Evidence references must exactly match the current evidence registry paths. This envelope
+is internal;
+the user sees only answer. When user input is required, instead return
+{"action":"request_context","missing_context":["..."]}."""
 
 
 def build_system_prompt(

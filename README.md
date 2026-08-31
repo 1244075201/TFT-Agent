@@ -313,3 +313,17 @@ uv run tft-eval-grounded-decision
 uv run tft-eval-grounded-decision --case comparison_001
 uv run tft-eval-grounded-decision --slice unsupported_economy_threshold
 ```
+
+## Numeric Claim Provenance
+
+Prompting guides model behaviour; deterministic validation enforces factual precision. A final
+provider response uses a small internal envelope containing a natural-language `answer` and a flat
+`numeric_claims` array. Each user-visible number declares a meaning, unit, and either an exact
+current-task evidence reference or a small arithmetic derivation over supported values. The user
+sees only the answer, not this provenance metadata.
+
+The task-local evidence registry indexes scalar `GameState` and ToolResult fields. Validation
+distinguishes supported, unsupported, mismatched, and invalid-reference claims, including percent
+normalization such as `10% == 0.10`. Unsupported claims trigger at most one no-tools repair call.
+If repair is still invalid, a deterministic number-free fallback replaces the unsafe draft. Answers
+without numbers pass directly and incur no repair call.

@@ -8,6 +8,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import Field
+
 from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.runtime import AgentRuntime
 from tft_agent.agent.state import AgentState
@@ -57,6 +59,19 @@ class GroundingResult(StrictModel):
     input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None
+    numeric_claims: int = Field(ge=0)
+    supported_claims: int = Field(ge=0)
+    unsupported_claims: int = Field(ge=0)
+    mismatched_claims: int = Field(ge=0)
+    invalid_reference_claims: int = Field(ge=0)
+    validation_latency_ms: float = Field(ge=0)
+    correction_attempted: bool
+    correction_succeeded: bool
+    correction_latency_ms: float | None
+    correction_tokens: int | None
+    fallback_used: bool
+    initial_answer: str | None
+    claim_validation: list[dict[str, object]]
 
 
 def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResult:
@@ -101,6 +116,12 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
         and not explosion
     )
     usage = [call.token_usage for call in state.trace.llm_calls if call.token_usage is not None]
+    validation = state.trace.numeric_claim_validation
+    correction_usage = [
+        call.token_usage
+        for call in state.trace.llm_calls
+        if call.outcome == "numeric_correction" and call.token_usage is not None
+    ]
     return GroundingResult(
         case_id=case.id,
         slice=case.slice,
@@ -121,6 +142,23 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
         input_tokens=sum(item.prompt_tokens for item in usage) if usage else None,
         output_tokens=sum(item.completion_tokens for item in usage) if usage else None,
         total_tokens=sum(item.total_tokens for item in usage) if usage else None,
+        numeric_claims=validation.total_claims if validation else 0,
+        supported_claims=validation.supported_claims if validation else 0,
+        unsupported_claims=validation.unsupported_claims if validation else 0,
+        mismatched_claims=validation.mismatched_claims if validation else 0,
+        invalid_reference_claims=validation.invalid_reference_claims if validation else 0,
+        validation_latency_ms=validation.validation_latency_ms if validation else 0,
+        correction_attempted=validation.correction_attempted if validation else False,
+        correction_succeeded=validation.correction_succeeded if validation else False,
+        correction_latency_ms=validation.correction_latency_ms if validation else None,
+        correction_tokens=(
+            sum(item.total_tokens for item in correction_usage) if correction_usage else None
+        ),
+        fallback_used=validation.fallback_used if validation else False,
+        initial_answer=validation.initial_answer if validation else None,
+        claim_validation=(
+            [claim.model_dump(mode="json") for claim in validation.claims] if validation else []
+        ),
     )
 
 
@@ -197,6 +235,9 @@ async def _run(args: argparse.Namespace) -> None:
             result.exact_hit_probability_hallucination for result in results
         ),
         "unauthorized_tool_arguments": sum(result.unauthorized_tool_argument for result in results),
+        "corrections_attempted": sum(result.correction_attempted for result in results),
+        "corrections_succeeded": sum(result.correction_succeeded for result in results),
+        "fallbacks_used": sum(result.fallback_used for result in results),
         "results": [result.model_dump(mode="json") for result in results],
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)

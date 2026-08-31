@@ -4,6 +4,8 @@ from typing import Any
 
 from tft_agent.agent.state import AgentState
 
+EvidenceRegistry = dict[str, int | float | str]
+
 
 def build_evidence_context(state: AgentState) -> dict[str, Any]:
     """Separate explicit user facts from authoritative tool observations."""
@@ -46,6 +48,23 @@ def evidence_field_paths(context: dict[str, Any]) -> list[str]:
     return paths
 
 
+def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
+    """Index scalar facts from only the current task under stable provenance references."""
+
+    registry: EvidenceRegistry = {}
+    game_state = state.game_state.model_dump(
+        mode="json", exclude_none=True, exclude={"user_question"}
+    )
+    _register_scalars(registry, game_state, "game_state")
+    for record in state.tool_history:
+        prefix = f"tool.{record.tool_call.id}"
+        if isinstance(record.result.data, dict):
+            _register_scalars(registry, record.result.data, f"{prefix}.data")
+        metadata = record.result.metadata.model_dump(mode="json", exclude_none=True)
+        _register_scalars(registry, metadata, f"{prefix}.metadata")
+    return registry
+
+
 def _leaf_paths(value: dict[str, Any], prefix: str) -> list[str]:
     paths: list[str] = []
     for key, item in value.items():
@@ -55,3 +74,16 @@ def _leaf_paths(value: dict[str, Any], prefix: str) -> list[str]:
         else:
             paths.append(path)
     return paths
+
+
+def _register_scalars(
+    registry: EvidenceRegistry,
+    value: dict[str, Any],
+    prefix: str,
+) -> None:
+    for key, item in value.items():
+        path = f"{prefix}.{key}"
+        if isinstance(item, dict):
+            _register_scalars(registry, item, path)
+        elif isinstance(item, (int, float, str)) and not isinstance(item, bool):
+            registry[path] = item

@@ -154,6 +154,38 @@ class AgentAction(StrEnum):
     REQUEST_CONTEXT = "request_context"
 
 
+class NumericClaimStatus(StrEnum):
+    """Deterministic validation outcome for one declared user-facing number."""
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    MISMATCHED = "mismatched"
+    INVALID_REFERENCE = "invalid_reference"
+
+
+class NumericDerivation(StrictModel):
+    """Small arithmetic derivation over evidence references and numeric literals."""
+
+    operation: str
+    inputs: list[str | int | float] = Field(min_length=2)
+
+
+class NumericClaim(StrictModel):
+    """Provider-declared provenance for one user-visible numerical claim."""
+
+    value: int | float | str
+    unit: str | None = None
+    meaning: str = Field(min_length=1)
+    evidence_ref: str | None = None
+    derivation: NumericDerivation | None = None
+
+    @model_validator(mode="after")
+    def validate_source_shape(self) -> "NumericClaim":
+        if self.evidence_ref is not None and self.derivation is not None:
+            raise ValueError("numeric claim cannot have both evidence_ref and derivation")
+        return self
+
+
 class AgentDecision(StrictModel):
     """Exactly one high-level action selected by the LLM for a runtime step."""
 
@@ -162,11 +194,19 @@ class AgentDecision(StrictModel):
     final_response: FinalResponse | None = None
     missing_context: list[str] = Field(default_factory=list)
     reason: str | None = None
+    numeric_claims: list[NumericClaim] = Field(default_factory=list)
+    numeric_claims_declared: bool = False
 
     @model_validator(mode="after")
     def validate_action_payload(self) -> "AgentDecision":
         if self.action == AgentAction.TOOL_CALL:
-            if self.tool_call is None or self.final_response is not None or self.missing_context:
+            if (
+                self.tool_call is None
+                or self.final_response is not None
+                or self.missing_context
+                or self.numeric_claims
+                or self.numeric_claims_declared
+            ):
                 raise ValueError("tool_call action requires only tool_call payload")
         elif self.action == AgentAction.FINAL:
             if self.final_response is None or self.tool_call is not None or self.missing_context:
@@ -175,6 +215,8 @@ class AgentDecision(StrictModel):
             not self.missing_context
             or self.tool_call is not None
             or self.final_response is not None
+            or self.numeric_claims
+            or self.numeric_claims_declared
         ):
             raise ValueError("request_context action requires only non-empty missing_context")
         return self

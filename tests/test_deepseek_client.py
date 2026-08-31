@@ -71,6 +71,10 @@ def state() -> AgentState:
     )
 
 
+def numeric_envelope(answer: str, claims: list[dict[str, Any]]) -> SimpleNamespace:
+    return response(content=json.dumps({"answer": answer, "numeric_claims": claims}))
+
+
 @pytest.mark.asyncio
 async def test_normal_final_response_and_non_thinking_request() -> None:
     create = AsyncMock(
@@ -111,6 +115,29 @@ async def test_plain_visible_content_maps_to_final_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_numeric_envelope_tolerates_literal_newline_in_answer() -> None:
+    raw_envelope = (
+        '{"answer":"You have 35 HP.\nKeep the recommendation qualitative.",'
+        '"numeric_claims":[{"value":35,"unit":"hp","meaning":"current hp",'
+        '"evidence_ref":"game_state.hp"}]}'
+    )
+    create = AsyncMock(return_value=response(content=raw_envelope))
+    client = client_with_create(create)
+    agent_state = state()
+    agent_state.game_state.hp = 35
+
+    decision = await client.generate(agent_state, [])
+
+    assert decision.final_response is not None
+    assert decision.final_response.recommendation == (
+        "You have 35 HP.\nKeep the recommendation qualitative."
+    )
+    assert agent_state.trace.numeric_claim_validation is not None
+    assert agent_state.trace.numeric_claim_validation.supported_claims == 1
+    assert agent_state.trace.numeric_claim_validation.correction_attempted is False
+
+
+@pytest.mark.asyncio
 async def test_explicit_request_context_envelope_is_normalized() -> None:
     create = AsyncMock(
         return_value=response(
@@ -146,7 +173,19 @@ async def test_native_tool_call_and_id_are_preserved() -> None:
 async def test_tool_result_continuation_uses_native_protocol_messages() -> None:
     create = AsyncMock(
         return_value=response(
-            content=json.dumps({"action": "final", "recommendation": "It costs 3."})
+            content=json.dumps(
+                {
+                    "answer": "It costs 3.",
+                    "numeric_claims": [
+                        {
+                            "value": 3,
+                            "unit": "cost",
+                            "meaning": "champion cost",
+                            "evidence_ref": "tool.call-provider-2.data.cost",
+                        }
+                    ],
+                }
+            )
         )
     )
     agent_state = state()
@@ -247,6 +286,81 @@ async def test_request_context_contract_is_recognized_inside_visible_prose() -> 
 
     assert decision.action == AgentAction.REQUEST_CONTEXT
     assert decision.missing_context == ["level"]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_claims_trigger_one_successful_correction() -> None:
+    agent_state = AgentState(
+        game_state=GameState(hp=35, user_question="Should I roll?"),
+        goal="Should I roll?",
+    )
+    create = AsyncMock(
+        side_effect=[
+            numeric_envelope(
+                "You have 35 HP. Roll to 20 gold; you may survive 3 rounds.",
+                [
+                    {
+                        "value": 35,
+                        "unit": "hp",
+                        "meaning": "current hp",
+                        "evidence_ref": "game_state.hp",
+                    },
+                    {"value": 20, "unit": "gold", "meaning": "roll threshold"},
+                    {"value": 3, "unit": "rounds", "meaning": "survival estimate"},
+                ],
+            ),
+            numeric_envelope(
+                "You have 35 HP. Keep the recommendation qualitative.",
+                [
+                    {
+                        "value": 35,
+                        "unit": "hp",
+                        "meaning": "current hp",
+                        "evidence_ref": "game_state.hp",
+                    }
+                ],
+            ),
+        ]
+    )
+
+    decision = await client_with_create(create).generate(agent_state, [tool_definition()])
+
+    assert create.await_count == 2
+    assert decision.final_response is not None
+    assert "20" not in decision.final_response.recommendation
+    assert agent_state.trace.numeric_claim_validation is not None
+    assert agent_state.trace.numeric_claim_validation.supported_claims == 1
+    assert agent_state.trace.numeric_claim_validation.unsupported_claims == 2
+    assert agent_state.trace.numeric_claim_validation.correction_succeeded is True
+    assert agent_state.trace.numeric_claim_validation.fallback_used is False
+
+
+@pytest.mark.asyncio
+async def test_second_unsupported_claim_uses_safe_fallback_without_third_call() -> None:
+    agent_state = AgentState(
+        game_state=GameState(hp=35, user_question="Should I roll?"),
+        goal="Should I roll?",
+    )
+    create = AsyncMock(
+        side_effect=[
+            numeric_envelope(
+                "Roll to 20 gold.",
+                [{"value": 20, "unit": "gold", "meaning": "roll threshold"}],
+            ),
+            numeric_envelope(
+                "Roll to 25 gold.",
+                [{"value": 25, "unit": "gold", "meaning": "replacement threshold"}],
+            ),
+        ]
+    )
+
+    decision = await client_with_create(create).generate(agent_state, [tool_definition()])
+
+    assert create.await_count == 2
+    assert decision.final_response is not None
+    assert "precise numerical claims" in decision.final_response.recommendation
+    assert agent_state.trace.numeric_claim_validation is not None
+    assert agent_state.trace.numeric_claim_validation.fallback_used is True
 
 
 @pytest.mark.asyncio
