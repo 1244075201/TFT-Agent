@@ -291,3 +291,25 @@ uv run tft-eval-decision-v02
 uv run tft-eval-decision-v02 --case decision_001
 uv run tft-eval-decision-v02 --slice two_tool_useful_chain
 ```
+
+## Grounded Decision Policy
+
+Structured evidence constrains factual precision; the LLM remains responsible for qualitative
+decision reasoning. The provider receives a compact, source-separated evidence context containing
+explicit `GameState` facts and authoritative ToolResults. Trace records the corresponding evidence
+field paths without storing hidden reasoning.
+
+Specific numerical claims about game state, costs, shop odds, probabilities, thresholds, rounds,
+pool sizes, patches, or other version-sensitive mechanics must come from user facts, ToolResults,
+or transparent deterministic arithmetic over those values. A comparison may query another level
+when that evidence materially helps; otherwise the answer must remain qualitative. Unsupported
+economy cutoffs, exact survival estimates, and exact champion hit probabilities are prohibited.
+
+The separate opt-in regression set keeps its numerical and regex detectors strictly in the eval
+layer; production output is not post-processed or censored:
+
+```bash
+uv run tft-eval-grounded-decision
+uv run tft-eval-grounded-decision --case comparison_001
+uv run tft-eval-grounded-decision --slice unsupported_economy_threshold
+```

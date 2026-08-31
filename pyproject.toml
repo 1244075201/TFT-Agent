@@ -31,6 +31,7 @@ tft-sync-shop-odds = "tft_agent.ingestion.sync_shop_odds:main"
 tft-eval-tool-selection = "tft_agent.evals.tool_selection_runner:main"
 tft-eval-outcome-safety = "tft_agent.evals.outcome_safety_runner:main"
 tft-eval-decision-v02 = "tft_agent.evals.decision_v02_runner:main"
+tft-eval-grounded-decision = "tft_agent.evals.grounded_decision_runner:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tft_agent"]

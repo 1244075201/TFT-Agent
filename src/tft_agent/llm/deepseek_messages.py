@@ -15,6 +15,7 @@ from tft_agent.core.schemas import (
     ToolCall,
     ToolCallRecord,
 )
+from tft_agent.llm.evidence import build_evidence_context, evidence_field_paths
 from tft_agent.llm.prompts import build_system_prompt
 from tft_agent.llm.tool_adapter import to_function_schema
 from tft_agent.mcp_client.client import MCPToolDefinition
@@ -27,16 +28,14 @@ def build_provider_messages(
     """Rebuild native tool-call history from provider-neutral execution state."""
 
     question = state.game_state.user_question or state.goal
-    facts = state.game_state.model_dump(
-        mode="json",
-        exclude_none=True,
-        exclude={"user_question"},
-    )
+    evidence = build_evidence_context(state)
+    state.trace.grounded_evidence_fields = evidence_field_paths(evidence)
     user_content = question
-    if facts:
-        user_content += "\nKnown GameState facts: " + json.dumps(facts, ensure_ascii=False)
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(available_tools)},
+        {
+            "role": "system",
+            "content": build_system_prompt(available_tools, evidence),
+        },
         {"role": "user", "content": user_content},
     ]
     for record in state.tool_history:

@@ -39,6 +39,7 @@ class AgentTrace(StrictModel):
     final_used_tools: list[str] = Field(default_factory=list)
     final_sources: list[str] = Field(default_factory=list)
     game_state_snapshot: dict[str, Any] = Field(default_factory=dict)
+    grounded_evidence_fields: list[str] = Field(default_factory=list)
 
     @property
     def total_latency_ms(self) -> float | None:
