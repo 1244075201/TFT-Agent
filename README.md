@@ -37,6 +37,59 @@ final response, or request missing context. Tool calls pass only through `MCPCli
 their normalized results and timings are recorded in `AgentState`. The runtime stops on a
 terminal decision, an unrecoverable client failure, or the configured step limit.
 
+## Real LLM Agent Loop
+
+```text
+User natural language
+  -> DeepSeek Chat Completions
+  -> native function tool_call
+  -> project AgentDecision
+  -> AgentRuntime
+  -> stdio MCP client/server
+  -> get_champion_info
+  -> ToolResult
+  -> native assistant tool-call + tool message history
+  -> DeepSeek
+  -> FinalResponse
+```
+
+Tool calls use the provider's native `tools` and `tool_calls` protocol. Function arguments
+are parsed as JSON and validated against the discovered MCP input schema before execution.
+Tool results return through a native `role="tool"` message correlated by `tool_call_id`.
+Each tool message identifies its authoritative fields and provenance; version-sensitive facts
+outside that boundary must be reported as unknown rather than inferred from identifiers or model
+memory. Hidden model reasoning is neither stored nor logged.
+
+At task start, the system prompt receives a short capability context generated from the live MCP
+tool names and descriptions. The native function schemas remain in the provider `tools` parameter,
+so there is no second hand-maintained capability list or duplicated JSON Schema. Capability answers
+must distinguish general reasoning over user-provided facts from reliable external data access.
+
+Ordinary final answers are concise natural language rather than a mandatory large JSON contract.
+`FinalResponse` supports a recommendation-only fact answer; `used_tools` and `sources` are overwritten
+by `AgentRuntime` from actual tool history and provenance, never trusted from model output.
+
+## LLM Provider Boundary
+
+`AgentRuntime` depends only on the project `LLMClient` protocol. `DeepSeekLLMClient` owns the
+OpenAI-compatible SDK, DeepSeek request parameters, bounded transient retries, native message
+conversion, response normalization, and provider error classification. SDK response objects do
+not cross this boundary. MCP `list_tools()` remains the only source for provider function schemas.
+
+Parallel tool calls are intentionally unsupported. A response containing more than one tool call
+fails explicitly rather than introducing implicit ordering or concurrent orchestration.
+
+## DeepSeek Configuration
+
+The centralized settings module reads these environment variables from the local `.env` file:
+
+- `DEEPSEEK_API_KEY`
+- `TFT_AGENT_MODEL`
+- `DEEPSEEK_BASE_URL`
+- `TFT_AGENT_THINKING_MODE`
+
+The local `.env` is ignored by Git. Never place credentials in this README or tracked files.
+
 ## Data Workflow
 
 ```text
@@ -138,4 +191,74 @@ uv run tft-mcp-server --database data/tft.sqlite3
 
 The server writes protocol messages only to stdout; application logging uses stderr. The
 stdio client is an async context manager so leaving its block closes the connection and child
-process. A concrete LLM adapter and production RAG remain intentionally unimplemented.
+process.
+
+Run one real task after synchronizing data and configuring DeepSeek:
+
+```bash
+uv run tft-agent
+```
+
+## Current Limitations
+
+- One production tool: `get_champion_info`.
+- No RAG, vector database, or patch-note retrieval.
+- No reliable active-set mapping.
+- No long-term memory or planning layer.
+- No vision or screenshot input.
+- No parallel tool execution.
+- One-shot CLI only; no persistent chat session or streaming UI.
+
+## Agent Evaluation
+
+Tool selection is measured offline against the versioned Golden Set in
+`evals/tool_selection_cases.json`. The workflow calls the real configured provider and reads the
+existing agent trace; it does not add evaluation branches to `AgentRuntime` and never falls back to
+a fake model while reporting real benchmark results.
+
+The dataset policy marks unsupported champion fields as `no_call`: the current champion tool should
+only be selected when identity, cost, image metadata, or Data Dragon version directly contributes to
+the answer. In particular, the `champion_entity_but_tool_irrelevant` slice measures false positives
+where a champion name is present but the actual request concerns items, positioning, composition,
+meta strength, role, or trait strategy.
+
+Metrics include accuracy, tool-call precision and recall, false-positive/negative rates, per-slice
+analysis, latency, agent/LLM/tool call counts, and provider-reported token usage. Precision or recall
+with a zero denominator is reported as `N/A`, not zero. Results contain visible final text for manual
+review but no hidden reasoning or secrets.
+
+The full evaluation is explicitly billable and opt-in:
+
+```bash
+uv run tft-eval-tool-selection
+uv run tft-eval-tool-selection --slice champion_entity_but_tool_irrelevant
+uv run tft-eval-tool-selection --case direct_001
+uv run tft-eval-tool-selection --limit 3
+```
+
+Timestamped JSON artifacts are written under `eval_results/` and ignored by Git. Each artifact
+captures the model, thinking mode, dataset version, system-prompt version/hash, tool-description
+version/snapshot, overall and per-slice metrics, and per-case TP/TN/FP/FN classification.
+
+Tool Selection Evaluation and Outcome Safety Evaluation measure different boundaries. Selection
+asks whether the model chose an appropriate tool. Outcome safety checks deterministic behavior after
+a structured tool failure, including whether ambiguity stopped the loop before an unauthorized
+follow-up call. Run the small outcome regression set explicitly with:
+
+```bash
+uv run tft-eval-outcome-safety
+uv run tft-eval-outcome-safety --case ambiguity_001
+```
+
+## Semantic Decisions vs Runtime Invariants
+
+The LLM owns semantic choices: whether available evidence is relevant, which tool can help, concise
+reasoning, and visible natural-language answers. `AgentRuntime` owns deterministic invariants:
+bounded steps, tool-schema validation, structured error resolution, and the ambiguity stop policy.
+
+Every `ToolError` declares one provider-neutral resolution: `retry`, `request_context`, or
+`terminal`. A `request_context` failure is recorded as evidence and immediately transitions the task
+to `waiting_for_context`; the LLM cannot select one of the candidates in the same autonomous loop.
+A `terminal` failure ends the tool path with a minimal honest response. Retry is part of the contract,
+but automatic tool retry orchestration is intentionally not implemented yet. The runtime never
+branches on TFT-specific error codes or champion names.

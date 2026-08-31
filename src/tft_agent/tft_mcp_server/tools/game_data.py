@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from tft_agent.core.schemas import ToolError, ToolMetadata, ToolResult
+from tft_agent.core.schemas import ToolError, ToolErrorResolution, ToolMetadata, ToolResult
 from tft_agent.tft_mcp_server.repositories.game_data_repository import GameDataRepository
 from tft_agent.tft_mcp_server.tools.base import found_result, not_found_result
 
@@ -61,7 +61,8 @@ class GameDataTools:
                 error=ToolError(
                     code="AMBIGUOUS_CHAMPION",
                     message=f"Multiple champions are named {name!r}; supply champion_id",
-                    retryable=True,
+                    retryable=False,
+                    resolution=ToolErrorResolution.REQUEST_CONTEXT,
                 ),
             )
         candidate = candidates[0]

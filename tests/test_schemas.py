@@ -13,6 +13,7 @@ from tft_agent.core.schemas import (
     ToolCall,
     ToolCallRecord,
     ToolError,
+    ToolErrorResolution,
     ToolResult,
     UnitState,
 )
@@ -57,6 +58,15 @@ def test_agent_decision_enforces_action_payload() -> None:
     assert decision.final_response == final
 
 
+def test_final_response_allows_a_minimal_fact_answer() -> None:
+    response = FinalResponse(recommendation="Alistar is a 2-cost champion.")
+
+    assert response.reasoning == []
+    assert response.next_steps == []
+    assert response.alternatives == []
+    assert response.confidence is None
+
+
 def test_tool_result_requires_error_for_failure() -> None:
     with pytest.raises(ValidationError):
         ToolResult(tool_call_id="call-1", success=False)
@@ -79,3 +89,21 @@ def test_tool_result_and_record_capture_structured_failure() -> None:
     )
     assert record.result.error is not None
     assert record.result.error.code == "not_found"
+
+
+def test_tool_error_resolution_requires_consistent_retryability() -> None:
+    context_error = ToolError(
+        code="AMBIGUOUS",
+        message="choose one",
+        retryable=False,
+        resolution=ToolErrorResolution.REQUEST_CONTEXT,
+    )
+    assert context_error.resolution == ToolErrorResolution.REQUEST_CONTEXT
+
+    with pytest.raises(ValidationError):
+        ToolError(
+            code="TIMEOUT",
+            message="try later",
+            retryable=False,
+            resolution=ToolErrorResolution.RETRY,
+        )

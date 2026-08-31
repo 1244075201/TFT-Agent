@@ -61,12 +61,29 @@ class ToolCall(StrictModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolErrorResolution(StrEnum):
+    """Deterministic control action attached to a structured tool failure."""
+
+    RETRY = "retry"
+    REQUEST_CONTEXT = "request_context"
+    TERMINAL = "terminal"
+
+
 class ToolError(StrictModel):
     """A structured error safe to return across the tool boundary."""
 
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
     retryable: bool = False
+    resolution: ToolErrorResolution = ToolErrorResolution.TERMINAL
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> "ToolError":
+        if self.resolution == ToolErrorResolution.RETRY and not self.retryable:
+            raise ValueError("retry resolution requires retryable=true")
+        if self.resolution != ToolErrorResolution.RETRY and self.retryable:
+            raise ValueError("retryable=true requires retry resolution")
+        return self
 
 
 class ToolMetadata(StrictModel):

@@ -28,6 +28,7 @@ tft-agent = "tft_agent.app.main:main"
 tft-mcp-server = "tft_agent.tft_mcp_server.server:main"
 tft-sync-game-data = "tft_agent.ingestion.sync_game_data:main"
 tft-eval-tool-selection = "tft_agent.evals.tool_selection_runner:main"
+tft-eval-outcome-safety = "tft_agent.evals.outcome_safety_runner:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tft_agent"]

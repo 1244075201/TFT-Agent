@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tft_agent.core.schemas import ToolErrorResolution
 from tft_agent.tft_mcp_server.schemas import (
     ChampionImage,
     ChampionRecord,
@@ -74,6 +75,7 @@ async def test_champion_tool_returns_structured_not_found() -> None:
     assert result.success is False
     assert result.error is not None
     assert result.error.code == "CHAMPION_NOT_FOUND"
+    assert result.error.resolution == ToolErrorResolution.TERMINAL
 
 
 @pytest.mark.asyncio
@@ -85,5 +87,7 @@ async def test_champion_tool_preserves_ambiguity() -> None:
     assert result.success is False
     assert result.error is not None
     assert result.error.code == "AMBIGUOUS_CHAMPION"
+    assert result.error.retryable is False
+    assert result.error.resolution == ToolErrorResolution.REQUEST_CONTEXT
     assert isinstance(result.data, dict)
     assert len(result.data["candidates"]) == 2

@@ -76,8 +76,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await AgentRuntime(StubLLM(decisions), StubMCP(fail=True)).run(state)
 
         self.assertEqual(result.status, AgentStatus.COMPLETED)
-        self.assertEqual(result.step_count, 2)
+        self.assertEqual(result.step_count, 1)
         self.assertFalse(result.observations[0].success)
+        self.assertIsNotNone(result.final_response)
 
     async def test_request_context_and_max_steps_are_terminal(self) -> None:
         waiting = await AgentRuntime(

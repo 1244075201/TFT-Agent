@@ -1,0 +1,10 @@
+{"dataset_version":"outcome_safety_v1","cases":[
+{"id":"ambiguity_001","slice":"ambiguity","prompt":"Shen 的 Data Dragon 结构化信息是什么？","expected_status":"waiting_for_context","expected_tool_error_code":"AMBIGUOUS_CHAMPION","notes":"Ambiguous name must stop before candidate selection."},
+{"id":"ambiguity_002","slice":"ambiguity","prompt":"Shen 是几费卡？请查询同步数据。","expected_status":"waiting_for_context","expected_tool_error_code":"AMBIGUOUS_CHAMPION","notes":"Cost differs across candidates."},
+{"id":"not_found_001","slice":"not_found","prompt":"TFT_OUTCOME_MISSING_91AF 是几费卡？","expected_status":"completed","expected_tool_error_code":"CHAMPION_NOT_FOUND","notes":"Controlled missing name."},
+{"id":"not_found_002","slice":"not_found","prompt":"查询 TFT_OUTCOME_MISSING_B72E 的 champion ID。","expected_status":"completed","expected_tool_error_code":"CHAMPION_NOT_FOUND","notes":"Missing identity must terminate honestly."},
+{"id":"success_001","slice":"success","prompt":"Alistar 是几费卡？","expected_status":"completed","expected_tool_error_code":null,"notes":"Unique name succeeds."},
+{"id":"success_002","slice":"success","prompt":"查询 Alistar 的 champion ID。","expected_status":"completed","expected_tool_error_code":null,"notes":"Unique identity succeeds."},
+{"id":"explicit_id_001","slice":"explicit_disambiguation","prompt":"查询 champion ID 为 TFT16_Shen 的 Shen 是几费卡。","expected_status":"completed","expected_tool_error_code":null,"notes":"Explicit ID succeeds without clarification."},
+{"id":"explicit_id_002","slice":"explicit_disambiguation","prompt":"请按 champion ID DA_18_Shen 查询 Shen 的结构化信息。","expected_status":"completed","expected_tool_error_code":null,"notes":"Second explicit ID succeeds."}
+]}

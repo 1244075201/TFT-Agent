@@ -143,6 +143,20 @@ async def test_stdio_list_and_unique_not_found_and_ambiguous(tmp_path: Path) -> 
         assert isinstance(ambiguous.data, dict)
         assert len(ambiguous.data["candidates"]) == 2
 
+        disambiguated = await client.call_tool(
+            ToolCall(
+                id="disambiguated",
+                name="get_champion_info",
+                arguments={
+                    "name": "Duplicate Hero",
+                    "champion_id": "TFT_ModeA_Duplicate",
+                },
+            )
+        )
+        assert disambiguated.success is True
+        assert isinstance(disambiguated.data, dict)
+        assert disambiguated.data["champion_id"] == "TFT_ModeA_Duplicate"
+
 
 class FakeLLM:
     def __init__(self) -> None:
