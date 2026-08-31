@@ -28,7 +28,11 @@ def create_server(repository: GameDataRepository) -> MCPServer:
         champion_id: str | None = None,
         data_version: str | None = None,
     ) -> ToolResult:
-        """Return official normalized champion identity, cost, image, and provenance."""
+        """Retrieve authoritative champion identity, cost, image metadata, and Riot Data Dragon
+        data version. Use only when those fields directly help answer the request. Do not use for
+        items, builds, traits, abilities, positioning, strategy, meta strength, set membership,
+        base stats, or matchup advice.
+        """
 
         return await tools.lookup_champion(
             call_id="mcp-transport",

@@ -12,6 +12,9 @@ venv/
 .env
 .env.*
 !.env.example
+eval_results/*.json
+.env.*
+!.env.example
 *.pem
 *.key
 .secrets/
