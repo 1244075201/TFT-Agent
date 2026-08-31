@@ -32,6 +32,7 @@ from tft_agent.core.schemas import (
     AgentAction,
     AgentDecision,
     FinalResponse,
+    NumericClaim,
     NumericClaimStatus,
 )
 from tft_agent.llm.deepseek_messages import (
@@ -165,7 +166,7 @@ class DeepSeekLLMClient:
         except LLMProviderError:
             trace.correction_latency_ms = (perf_counter() - started) * 1000
             trace.fallback_used = True
-            return _safe_fallback()
+            return _safe_fallback(report)
         correction_ms = (perf_counter() - started) * 1000
         trace.correction_latency_ms = correction_ms
         state.trace.llm_calls.append(
@@ -183,8 +184,11 @@ class DeepSeekLLMClient:
             if corrected_report.valid and _declaration_complete(correction):
                 trace.correction_succeeded = True
                 return correction
+        if correction.action == AgentAction.REQUEST_CONTEXT and not state.tool_history:
+            trace.correction_succeeded = True
+            return correction
         trace.fallback_used = True
-        return _safe_fallback()
+        return _safe_fallback(report)
 
     async def close(self) -> None:
         """Close provider transports owned by this adapter."""
@@ -305,21 +309,42 @@ def _correction_feedback(report: NumericValidationReport, decision: AgentDecisio
         f"{json.dumps(failures, ensure_ascii=False)}. Rewrite the answer while preserving "
         "supported "
         "facts and qualitative advice. Remove unsupported precision; do not introduce replacement "
-        "numbers. Return only the small answer + numeric_claims envelope. Do not call tools."
+        "numbers. Return only the segmented supported_facts + qualitative_recommendation envelope. "
+        "If a responsible answer requires missing user facts, return the request_context envelope "
+        "instead. Do not call tools."
     )
 
 
-def _safe_fallback() -> AgentDecision:
+def _safe_fallback(report: NumericValidationReport) -> AgentDecision:
+    supported = [
+        result.claim for result in report.results if result.status == NumericClaimStatus.SUPPORTED
+    ]
+    facts = "; ".join(_render_claim(claim) for claim in supported)
+    prefix = f"Verified facts: {facts}. " if facts else ""
     return AgentDecision(
         action=AgentAction.FINAL,
         final_response=FinalResponse(
             recommendation=(
-                "I can provide a qualitative recommendation, but the available evidence does not "
-                "support the precise numerical claims in the draft."
+                f"{prefix}I can provide a qualitative recommendation, but the available evidence "
+                "does not support the other precise quantities in the draft."
             )
         ),
+        numeric_claims=supported,
         numeric_claims_declared=True,
     )
+
+
+def _render_claim(claim: NumericClaim) -> str:
+    value: str
+    if claim.unit == "probability" and isinstance(claim.value, (int, float)):
+        value = f"{float(claim.value) * 100:g}%"
+    elif claim.unit == "percent":
+        value = f"{claim.value}%"
+    else:
+        value = str(claim.value)
+        if claim.unit:
+            value = f"{value} {claim.unit}"
+    return f"{claim.meaning} = {value}"
 
 
 def _map_provider_error(exc: Exception) -> LLMProviderError:

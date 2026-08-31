@@ -7,10 +7,13 @@ from jsonschema import ValidationError as JSONSchemaValidationError
 from jsonschema import validate
 
 from tft_agent.agent.state import AgentState
+from tft_agent.agent.tool_arguments import ToolArgumentValidator, construct_argument_claims
+from tft_agent.core.evidence import build_evidence_registry
 from tft_agent.core.schemas import (
     AgentAction,
     AgentStatus,
     FinalResponse,
+    NumericClaimStatus,
     ToolCall,
     ToolCallRecord,
     ToolError,
@@ -57,6 +60,16 @@ class AgentRuntime:
 
                 # AgentDecision validation guarantees this payload exists.
                 assert decision.tool_call is not None
+                grounded = self._ground_tool_arguments(state, decision.tool_call)
+                if grounded is None:
+                    state.missing_context = [
+                        f"Provide evidence for tool argument: {name}"
+                        for name in decision.tool_call.arguments
+                    ]
+                    argument_trace = state.trace.tool_argument_validation
+                    argument_trace.request_context_due_to_argument_grounding += 1
+                    return self._finish(state, AgentStatus.WAITING_FOR_CONTEXT)
+                decision.tool_call = grounded
                 result = await self._execute_tool(state, decision.tool_call, tools)
                 resolved = self._resolve_tool_failure(state, result)
                 if resolved is not None:
@@ -67,6 +80,37 @@ class AgentRuntime:
             logger.exception("Agent runtime failed")
             state.failure_reason = str(exc)
             return self._finish(state, AgentStatus.FAILED)
+
+    @staticmethod
+    def _ground_tool_arguments(state: AgentState, tool_call: ToolCall) -> ToolCall | None:
+        """Enforce current-task provenance before any MCP execution."""
+
+        trace = state.trace.tool_argument_validation
+        trace.proposed_tool_calls += 1
+        registry = build_evidence_registry(state)
+        claims = tool_call.argument_claims or construct_argument_claims(
+            tool_call.arguments, registry
+        )
+        grounded = tool_call.model_copy(update={"argument_claims": claims})
+        results = ToolArgumentValidator().validate(grounded, registry)
+        trace.argument_claim_count += len(results)
+        trace.supported_argument_claims += sum(
+            result.status == NumericClaimStatus.SUPPORTED for result in results
+        )
+        trace.unsupported_argument_claims += sum(
+            result.status == NumericClaimStatus.UNSUPPORTED for result in results
+        )
+        trace.mismatched_argument_claims += sum(
+            result.status == NumericClaimStatus.MISMATCHED for result in results
+        )
+        trace.invalid_reference_argument_claims += sum(
+            result.status == NumericClaimStatus.INVALID_REFERENCE for result in results
+        )
+        if any(result.status != NumericClaimStatus.SUPPORTED for result in results):
+            trace.blocked_tool_calls += 1
+            return None
+        trace.executed_tool_calls += 1
+        return grounded
 
     async def _execute_tool(
         self,

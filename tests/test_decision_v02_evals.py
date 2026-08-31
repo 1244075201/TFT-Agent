@@ -90,3 +90,70 @@ def test_decision_result_rejects_a_correct_sequence_with_tool_failure() -> None:
     )
 
     assert build_decision_result(case, state).passed is False
+
+
+def test_decision_result_accepts_equivalent_tool_order_when_not_required() -> None:
+    case = DecisionCase(
+        id="order",
+        slice="two_tool_useful_chain",
+        prompt="fixture",
+        expected_tool_sequence=["get_champion_info", "get_shop_odds"],
+        expected_status="completed",
+        notes="Both independent facts are required; either acquisition order is valid.",
+    )
+    now = utc_now()
+    history = []
+    for index, name in enumerate(["get_shop_odds", "get_champion_info"]):
+        call = ToolCall(id=str(index), name=name)
+        history.append(
+            ToolCallRecord(
+                tool_call=call,
+                result=ToolResult(tool_call_id=str(index), success=True, data={}),
+                started_at=now,
+                finished_at=now,
+                latency_ms=0,
+            )
+        )
+    state = AgentState(
+        game_state=GameState(),
+        goal="fixture",
+        status=AgentStatus.COMPLETED,
+        final_response=FinalResponse(recommendation="fixture"),
+        tool_history=history,
+    )
+
+    assert build_decision_result(case, state).passed is True
+
+
+def test_decision_result_enforces_order_when_dependency_is_declared() -> None:
+    case = DecisionCase(
+        id="strict-order",
+        slice="two_tool_useful_chain",
+        prompt="fixture",
+        expected_tool_sequence=["get_champion_info", "get_shop_odds"],
+        expected_status="completed",
+        notes="Fixture with an explicit dependency.",
+        order_required=True,
+    )
+    now = utc_now()
+    history = []
+    for index, name in enumerate(["get_shop_odds", "get_champion_info"]):
+        call = ToolCall(id=str(index), name=name)
+        history.append(
+            ToolCallRecord(
+                tool_call=call,
+                result=ToolResult(tool_call_id=str(index), success=True, data={}),
+                started_at=now,
+                finished_at=now,
+                latency_ms=0,
+            )
+        )
+    state = AgentState(
+        game_state=GameState(),
+        goal="fixture",
+        status=AgentStatus.COMPLETED,
+        final_response=FinalResponse(recommendation="fixture"),
+        tool_history=history,
+    )
+
+    assert build_decision_result(case, state).passed is False

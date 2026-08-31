@@ -314,16 +314,30 @@ uv run tft-eval-grounded-decision --case comparison_001
 uv run tft-eval-grounded-decision --slice unsupported_economy_threshold
 ```
 
+## Tool Argument Grounding
+
+An LLM may propose a native ToolCall, but its arguments are not trusted merely because they satisfy
+the MCP JSON Schema. Each argument receives an internal `ToolArgumentClaim` referencing current-task
+evidence or a small deterministic derivation. A provider-neutral validator runs before MCP execution;
+unsupported, mismatched, or invalid references block the call and move the task to
+`WAITING_FOR_CONTEXT`. This provenance is an Agent control contract and is not added to MCP schemas.
+
 ## Numeric Claim Provenance
 
 Prompting guides model behaviour; deterministic validation enforces factual precision. A final
-provider response uses a small internal envelope containing a natural-language `answer` and a flat
-`numeric_claims` array. Each user-visible number declares a meaning, unit, and either an exact
-current-task evidence reference or a small arithmetic derivation over supported values. The user
-sees only the answer, not this provenance metadata.
+provider response uses a small segmented envelope containing supported fact sentences, their
+`numeric_claims`, and a quantity-free qualitative recommendation. Each user-visible number declares
+a meaning, unit, and either an exact current-task evidence reference or a small arithmetic
+derivation over supported values. The user sees only the deterministically assembled answer, not
+this provenance metadata. Unicode numeric-property checking covers number symbols across languages
+without a language-specific production blacklist.
 
 The task-local evidence registry indexes scalar `GameState` and ToolResult fields. Validation
 distinguishes supported, unsupported, mismatched, and invalid-reference claims, including percent
 normalization such as `10% == 0.10`. Unsupported claims trigger at most one no-tools repair call.
-If repair is still invalid, a deterministic number-free fallback replaces the unsafe draft. Answers
-without numbers pass directly and incur no repair call.
+If repair is still invalid, a deterministic fallback preserves validated facts using normalized
+numeric rendering and replaces unsafe precision. Answers without quantities pass directly and incur
+no repair call.
+
+Factual precision is controlled by structured evidence, while qualitative strategy remains
+model-generated.

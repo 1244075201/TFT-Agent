@@ -27,6 +27,7 @@ class DecisionCase(StrictModel):
     expected_tool_sequence: list[str]
     expected_status: str
     notes: str
+    order_required: bool = False
 
 
 class DecisionDataset(StrictModel):
@@ -40,6 +41,7 @@ class DecisionResult(StrictModel):
     passed: bool
     expected_tool_sequence: list[str]
     actual_tool_sequence: list[str]
+    order_required: bool
     final_status: str
     tool_success: list[bool]
     tool_error_codes: list[str]
@@ -67,12 +69,17 @@ def build_decision_result(case: DecisionCase, state: AgentState) -> DecisionResu
         id=case.id,
         slice=case.slice,
         passed=(
-            actual == case.expected_tool_sequence
+            (
+                actual == case.expected_tool_sequence
+                if case.order_required
+                else sorted(actual) == sorted(case.expected_tool_sequence)
+            )
             and state.status.value == case.expected_status
             and all(record.result.success for record in state.tool_history)
         ),
         expected_tool_sequence=case.expected_tool_sequence,
         actual_tool_sequence=actual,
+        order_required=case.order_required,
         final_status=state.status.value,
         tool_success=[record.result.success for record in state.tool_history],
         tool_error_codes=errors,

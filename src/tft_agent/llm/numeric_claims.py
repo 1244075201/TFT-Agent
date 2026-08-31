@@ -1,6 +1,7 @@
 """Deterministic numeric-claim provenance validation and safe repair inputs."""
 
 import re
+import unicodedata
 from functools import reduce
 from math import isclose
 from operator import add, mul, sub, truediv
@@ -146,7 +147,25 @@ def _literal(value: str | int | float) -> float:
 
 
 def _numeric_literals(answer: str) -> set[str]:
-    return set(re.findall(r"(?<![\w])\d+(?:\.\d+)*(?:%)?", answer))
+    literals = set(re.findall(r"(?<![\w])\d+(?:\.\d+)*(?:%)?", answer))
+    unicode_run = ""
+    for character in answer:
+        if not character.isascii() and _has_numeric_property(character):
+            unicode_run += character
+        elif unicode_run:
+            literals.add(unicode_run)
+            unicode_run = ""
+    if unicode_run:
+        literals.add(unicode_run)
+    return literals
+
+
+def _has_numeric_property(character: str) -> bool:
+    try:
+        unicodedata.numeric(character)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _claim_literal_forms(claim: NumericClaim) -> set[str]:

@@ -53,6 +53,20 @@ class NumericClaimValidationTrace(StrictModel):
     claims: list[NumericClaimTrace] = Field(default_factory=list)
 
 
+class ToolArgumentValidationTrace(StrictModel):
+    """Aggregate pre-execution argument provenance enforcement."""
+
+    proposed_tool_calls: int = Field(default=0, ge=0)
+    executed_tool_calls: int = Field(default=0, ge=0)
+    argument_claim_count: int = Field(default=0, ge=0)
+    supported_argument_claims: int = Field(default=0, ge=0)
+    unsupported_argument_claims: int = Field(default=0, ge=0)
+    mismatched_argument_claims: int = Field(default=0, ge=0)
+    invalid_reference_argument_claims: int = Field(default=0, ge=0)
+    blocked_tool_calls: int = Field(default=0, ge=0)
+    request_context_due_to_argument_grounding: int = Field(default=0, ge=0)
+
+
 class AgentTrace(StrictModel):
     """Lifecycle and LLM summaries for one bounded agent task."""
 
@@ -67,6 +81,9 @@ class AgentTrace(StrictModel):
     game_state_snapshot: dict[str, Any] = Field(default_factory=dict)
     grounded_evidence_fields: list[str] = Field(default_factory=list)
     numeric_claim_validation: NumericClaimValidationTrace | None = None
+    tool_argument_validation: ToolArgumentValidationTrace = Field(
+        default_factory=ToolArgumentValidationTrace
+    )
 
     @property
     def total_latency_ms(self) -> float | None:

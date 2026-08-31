@@ -132,8 +132,9 @@ def normalize_provider_response(
         # preserving JSON structure and claim validation at our domain boundary.
         payload = json.loads(content, strict=False)
     except json.JSONDecodeError:
-        embedded = _embedded_request_context(content)
-        return embedded if embedded is not None else _plain_final(content)
+        payload = _embedded_envelope(content)
+        if payload is None:
+            return _plain_final(content)
     if not isinstance(payload, dict):
         return _plain_final(content)
     if payload.get("action") == AgentAction.REQUEST_CONTEXT.value:
@@ -160,6 +161,35 @@ def normalize_provider_response(
             numeric_claims=claims,
             numeric_claims_declared=True,
         )
+    if "supported_facts" in payload:
+        raw_facts = payload.get("supported_facts")
+        recommendation = payload.get("qualitative_recommendation")
+        if not isinstance(raw_facts, list) or not isinstance(recommendation, str):
+            raise _malformed("segmented final envelope has invalid fields")
+        fact_texts: list[str] = []
+        segment_claims: list[NumericClaim] = []
+        try:
+            for fact in raw_facts:
+                if not isinstance(fact, dict) or not isinstance(fact.get("text"), str):
+                    raise ValueError("invalid fact segment")
+                raw_segment_claims = fact.get("numeric_claims")
+                if not isinstance(raw_segment_claims, list):
+                    raise ValueError("invalid fact claims")
+                fact_texts.append(fact["text"].strip())
+                segment_claims.extend(
+                    NumericClaim.model_validate(item) for item in raw_segment_claims
+                )
+        except (PydanticValidationError, ValueError) as exc:
+            raise _malformed("segmented final envelope contains an invalid fact") from exc
+        answer = "\n\n".join(text for text in [*fact_texts, recommendation.strip()] if text)
+        if not answer:
+            raise _malformed("segmented final envelope is empty")
+        return AgentDecision(
+            action=AgentAction.FINAL,
+            final_response=FinalResponse(recommendation=answer),
+            numeric_claims=segment_claims,
+            numeric_claims_declared=True,
+        )
     if payload.get("action") != AgentAction.FINAL.value:
         return _plain_final(content)
     recommendation = payload.get("recommendation")
@@ -176,10 +206,10 @@ def normalize_provider_response(
     )
 
 
-def _embedded_request_context(content: str) -> AgentDecision | None:
-    """Recognize the explicit decision contract even when surrounded by visible prose."""
+def _embedded_envelope(content: str) -> dict[str, Any] | None:
+    """Extract only a recognized complete envelope when surrounded by provider prose."""
 
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(strict=False)
     for index, character in enumerate(content):
         if character != "{":
             continue
@@ -187,11 +217,12 @@ def _embedded_request_context(content: str) -> AgentDecision | None:
             payload, _ = decoder.raw_decode(content[index:])
         except json.JSONDecodeError:
             continue
-        if not isinstance(payload, dict) or payload.get("action") != "request_context":
-            continue
-        missing = payload.get("missing_context")
-        if isinstance(missing, list) and missing and all(isinstance(item, str) for item in missing):
-            return AgentDecision(action=AgentAction.REQUEST_CONTEXT, missing_context=missing)
+        if isinstance(payload, dict) and (
+            payload.get("action") == "request_context"
+            or "supported_facts" in payload
+            or "answer" in payload
+        ):
+            return payload
     return None
 
 

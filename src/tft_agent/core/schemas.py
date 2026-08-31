@@ -1,5 +1,7 @@
 """Shared, transport-safe domain schemas."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -55,14 +57,6 @@ class GameState(StrictModel):
     user_question: str | None = None
 
 
-class ToolCall(StrictModel):
-    """A model-requested tool invocation."""
-
-    id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    arguments: dict[str, Any] = Field(default_factory=dict)
-
-
 class ToolErrorResolution(StrEnum):
     """Deterministic control action attached to a structured tool failure."""
 
@@ -80,7 +74,7 @@ class ToolError(StrictModel):
     resolution: ToolErrorResolution = ToolErrorResolution.TERMINAL
 
     @model_validator(mode="after")
-    def validate_resolution(self) -> "ToolError":
+    def validate_resolution(self) -> ToolError:
         if self.resolution == ToolErrorResolution.RETRY and not self.retryable:
             raise ValueError("retry resolution requires retryable=true")
         if self.resolution != ToolErrorResolution.RETRY and self.retryable:
@@ -110,7 +104,7 @@ class ToolResult(StrictModel):
     error: ToolError | None = None
 
     @model_validator(mode="after")
-    def validate_outcome(self) -> "ToolResult":
+    def validate_outcome(self) -> ToolResult:
         if self.success and self.error is not None:
             raise ValueError("successful tool results cannot contain an error")
         if not self.success and self.error is None:
@@ -170,6 +164,30 @@ class NumericDerivation(StrictModel):
     inputs: list[str | int | float] = Field(min_length=2)
 
 
+class ToolArgumentClaim(StrictModel):
+    """Current-task provenance for one proposed tool argument."""
+
+    argument_name: str = Field(min_length=1)
+    value: Any
+    evidence_ref: str | None = None
+    derivation: NumericDerivation | None = None
+
+    @model_validator(mode="after")
+    def validate_source_shape(self) -> ToolArgumentClaim:
+        if self.evidence_ref is not None and self.derivation is not None:
+            raise ValueError("tool argument claim cannot have both evidence_ref and derivation")
+        return self
+
+
+class ToolCall(StrictModel):
+    """A model-requested tool invocation with provider-internal provenance."""
+
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    argument_claims: list[ToolArgumentClaim] = Field(default_factory=list)
+
+
 class NumericClaim(StrictModel):
     """Provider-declared provenance for one user-visible numerical claim."""
 
@@ -180,7 +198,7 @@ class NumericClaim(StrictModel):
     derivation: NumericDerivation | None = None
 
     @model_validator(mode="after")
-    def validate_source_shape(self) -> "NumericClaim":
+    def validate_source_shape(self) -> NumericClaim:
         if self.evidence_ref is not None and self.derivation is not None:
             raise ValueError("numeric claim cannot have both evidence_ref and derivation")
         return self
@@ -198,7 +216,7 @@ class AgentDecision(StrictModel):
     numeric_claims_declared: bool = False
 
     @model_validator(mode="after")
-    def validate_action_payload(self) -> "AgentDecision":
+    def validate_action_payload(self) -> AgentDecision:
         if self.action == AgentAction.TOOL_CALL:
             if (
                 self.tool_call is None

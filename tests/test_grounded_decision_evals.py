@@ -76,3 +76,10 @@ def test_eval_accepts_queried_level_comparison() -> None:
 
     assert result.unqueried_level_probability_claim is False
     assert result.passed is True
+
+
+def test_eval_flags_chinese_quantity_expression() -> None:
+    result = evaluate_grounding(_case(), _state("大概还能撑三五波。", [7]))
+
+    assert result.chinese_numeral_unsupported_expression is True
+    assert result.passed is False

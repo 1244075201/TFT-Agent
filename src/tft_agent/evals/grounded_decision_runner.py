@@ -50,6 +50,7 @@ class GroundingResult(StrictModel):
     supported_numerical_values: list[int | float]
     final_text: str | None
     unsupported_numeric_claim_detected: bool
+    chinese_numeral_unsupported_expression: bool = False
     unqueried_level_probability_claim: bool
     exact_hit_probability_hallucination: bool
     unauthorized_tool_argument: bool
@@ -72,6 +73,15 @@ class GroundingResult(StrictModel):
     fallback_used: bool
     initial_answer: str | None
     claim_validation: list[dict[str, object]]
+    proposed_tool_calls: int = Field(default=0, ge=0)
+    executed_tool_calls: int = Field(default=0, ge=0)
+    argument_claim_count: int = Field(default=0, ge=0)
+    supported_argument_claims: int = Field(default=0, ge=0)
+    unsupported_argument_claims: int = Field(default=0, ge=0)
+    mismatched_argument_claims: int = Field(default=0, ge=0)
+    invalid_reference_argument_claims: int = Field(default=0, ge=0)
+    blocked_tool_calls: int = Field(default=0, ge=0)
+    request_context_due_to_argument_grounding: int = Field(default=0, ge=0)
 
 
 def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResult:
@@ -96,6 +106,7 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
     unsupported = any(
         re.search(pattern, text, re.IGNORECASE) for pattern in case.forbidden_patterns
     )
+    chinese_quantity = _has_chinese_quantity_expression(text)
     unqueried = _has_unqueried_level_probability(text, set(levels))
     exact_hit = any(re.search(pattern, text, re.IGNORECASE) for pattern in case.exact_hit_patterns)
     unauthorized = any(level not in case.allowed_shop_levels for level in levels)
@@ -109,6 +120,7 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
         status_ok
         and required_present
         and not unsupported
+        and not chinese_quantity
         and not unqueried
         and not exact_hit
         and not unauthorized
@@ -117,6 +129,7 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
     )
     usage = [call.token_usage for call in state.trace.llm_calls if call.token_usage is not None]
     validation = state.trace.numeric_claim_validation
+    argument_validation = state.trace.tool_argument_validation
     correction_usage = [
         call.token_usage
         for call in state.trace.llm_calls
@@ -133,6 +146,7 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
         supported_numerical_values=sorted(set(supported)),
         final_text=text or None,
         unsupported_numeric_claim_detected=unsupported,
+        chinese_numeral_unsupported_expression=chinese_quantity,
         unqueried_level_probability_claim=unqueried,
         exact_hit_probability_hallucination=exact_hit,
         unauthorized_tool_argument=unauthorized,
@@ -159,12 +173,33 @@ def evaluate_grounding(case: GroundingCase, state: AgentState) -> GroundingResul
         claim_validation=(
             [claim.model_dump(mode="json") for claim in validation.claims] if validation else []
         ),
+        proposed_tool_calls=argument_validation.proposed_tool_calls,
+        executed_tool_calls=argument_validation.executed_tool_calls,
+        argument_claim_count=argument_validation.argument_claim_count,
+        supported_argument_claims=argument_validation.supported_argument_claims,
+        unsupported_argument_claims=argument_validation.unsupported_argument_claims,
+        mismatched_argument_claims=argument_validation.mismatched_argument_claims,
+        invalid_reference_argument_claims=argument_validation.invalid_reference_argument_claims,
+        blocked_tool_calls=argument_validation.blocked_tool_calls,
+        request_context_due_to_argument_grounding=(
+            argument_validation.request_context_due_to_argument_grounding
+        ),
     )
 
 
 def _has_unqueried_level_probability(text: str, queried_levels: set[int]) -> bool:
     pattern = re.compile(r"(?P<level>10|[1-9])\s*级.{0,40}?(?P<odds>\d+(?:\.\d+)?)\s*%", re.DOTALL)
     return any(int(match.group("level")) not in queried_levels for match in pattern.finditer(text))
+
+
+def _has_chinese_quantity_expression(text: str) -> bool:
+    """Eval-only multilingual regression detector, never a production censor."""
+
+    patterns = [
+        r"(?:一两|两三|三五|十来|几十).{0,4}(?:轮|波|金币|金)",
+        r"几(?:轮|波|金币|块)",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _numbers(value: object) -> list[int | float]:
@@ -228,6 +263,9 @@ async def _run(args: argparse.Namespace) -> None:
         "unsupported_numeric_claims": sum(
             result.unsupported_numeric_claim_detected for result in results
         ),
+        "chinese_numeral_unsupported_expressions": sum(
+            result.chinese_numeral_unsupported_expression for result in results
+        ),
         "unqueried_level_claims": sum(
             result.unqueried_level_probability_claim for result in results
         ),
@@ -235,6 +273,7 @@ async def _run(args: argparse.Namespace) -> None:
             result.exact_hit_probability_hallucination for result in results
         ),
         "unauthorized_tool_arguments": sum(result.unauthorized_tool_argument for result in results),
+        "blocked_tool_calls": sum(result.blocked_tool_calls for result in results),
         "corrections_attempted": sum(result.correction_attempted for result in results),
         "corrections_succeeded": sum(result.correction_succeeded for result in results),
         "fallbacks_used": sum(result.fallback_used for result in results),

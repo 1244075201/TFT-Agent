@@ -1,3 +1,5 @@
+import pytest
+
 from tft_agent.core.schemas import NumericClaim, NumericClaimStatus, NumericDerivation
 from tft_agent.llm.numeric_claims import NumericClaimValidator
 
@@ -92,3 +94,11 @@ def test_percent_claim_covers_percent_and_decimal_renderings() -> None:
     )
 
     assert report.valid is True
+
+
+@pytest.mark.parametrize("text", ["还能撑三五轮", "建议留十来金币", "大约一两轮"])
+def test_unicode_numeric_words_require_declared_provenance(text: str) -> None:
+    report = NumericClaimValidator().validate_answer(text, [], {})
+
+    assert not report.valid
+    assert all(result.status == NumericClaimStatus.UNSUPPORTED for result in report.results)

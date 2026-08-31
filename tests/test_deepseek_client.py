@@ -138,6 +138,116 @@ async def test_numeric_envelope_tolerates_literal_newline_in_answer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_segmented_final_envelope_is_assembled() -> None:
+    content = json.dumps(
+        {
+            "supported_facts": [
+                {
+                    "text": "You currently have 35 HP.",
+                    "numeric_claims": [
+                        {
+                            "value": 35,
+                            "unit": "hp",
+                            "meaning": "current hp",
+                            "evidence_ref": "game_state.hp",
+                        }
+                    ],
+                }
+            ],
+            "qualitative_recommendation": "Keep the recommendation qualitative.",
+        }
+    )
+    create = AsyncMock(return_value=response(content=content))
+    agent_state = state()
+    agent_state.game_state.hp = 35
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.final_response is not None
+    assert decision.final_response.recommendation == (
+        "You currently have 35 HP.\n\nKeep the recommendation qualitative."
+    )
+    assert agent_state.trace.numeric_claim_validation is not None
+    assert agent_state.trace.numeric_claim_validation.supported_claims == 1
+
+
+@pytest.mark.asyncio
+async def test_segmented_envelope_is_extracted_from_provider_preface() -> None:
+    envelope = json.dumps(
+        {
+            "supported_facts": [
+                {
+                    "text": "Current gold is 40.",
+                    "numeric_claims": [
+                        {
+                            "value": 40,
+                            "unit": "gold",
+                            "meaning": "current gold",
+                            "evidence_ref": "game_state.gold",
+                        }
+                    ],
+                }
+            ],
+            "qualitative_recommendation": "This matches the supplied fact.",
+        }
+    )
+    create = AsyncMock(return_value=response(content=f"Here is the result.\n{envelope}"))
+    agent_state = state()
+    agent_state.game_state.gold = 40
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.final_response is not None
+    assert decision.final_response.recommendation.startswith("Current gold is 40.")
+    assert create.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsupported", ["你大概还能撑三五轮。", "建议留十来金币。"])
+async def test_unicode_quantity_is_repaired_before_user_output(unsupported: str) -> None:
+    create = AsyncMock(
+        side_effect=[
+            numeric_envelope(unsupported, []),
+            numeric_envelope("当前证据只支持定性建议。", []),
+        ]
+    )
+    agent_state = state()
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.final_response is not None
+    assert unsupported not in decision.final_response.recommendation
+    assert agent_state.trace.numeric_claim_validation is not None
+    assert agent_state.trace.numeric_claim_validation.correction_attempted is True
+    assert agent_state.trace.numeric_claim_validation.correction_succeeded is True
+
+
+@pytest.mark.asyncio
+async def test_numeric_repair_may_request_missing_context() -> None:
+    create = AsyncMock(
+        side_effect=[
+            numeric_envelope(
+                "Roll at level 7.",
+                [{"value": 7, "unit": "level", "meaning": "guessed level"}],
+            ),
+            response(
+                content=json.dumps(
+                    {
+                        "action": "request_context",
+                        "missing_context": ["player level", "target cost"],
+                    }
+                )
+            ),
+        ]
+    )
+
+    decision = await client_with_create(create).generate(state(), [])
+
+    assert decision.action == AgentAction.REQUEST_CONTEXT
+    assert decision.missing_context == ["player level", "target cost"]
+
+
+@pytest.mark.asyncio
 async def test_explicit_request_context_envelope_is_normalized() -> None:
     create = AsyncMock(
         return_value=response(
@@ -358,7 +468,7 @@ async def test_second_unsupported_claim_uses_safe_fallback_without_third_call() 
 
     assert create.await_count == 2
     assert decision.final_response is not None
-    assert "precise numerical claims" in decision.final_response.recommendation
+    assert "precise quantities" in decision.final_response.recommendation
     assert agent_state.trace.numeric_claim_validation is not None
     assert agent_state.trace.numeric_claim_validation.fallback_used is True
 

@@ -10,6 +10,7 @@ from tft_agent.core.schemas import (
     AgentStatus,
     FinalResponse,
     GameState,
+    ToolArgumentClaim,
     ToolCall,
     ToolError,
     ToolErrorResolution,
@@ -70,6 +71,22 @@ class ResultMCPClient(FakeMCPClient):
     async def call_tool(self, tool_call: ToolCall) -> ToolResult:
         self.calls.append(tool_call)
         return self.result.model_copy(update={"tool_call_id": tool_call.id})
+
+
+class ArgumentMCPClient(FakeMCPClient):
+    async def list_tools(self) -> list[MCPToolDefinition]:
+        return [
+            MCPToolDefinition(
+                name="lookup",
+                description="Look up a numeric fixture",
+                input_schema={
+                    "type": "object",
+                    "properties": {"level": {"type": "integer"}},
+                    "required": ["level"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
 
 
 def make_state(max_steps: int = 3) -> AgentState:
@@ -248,7 +265,7 @@ async def test_runtime_rejects_arguments_outside_discovered_mcp_schema() -> None
         [
             AgentDecision(
                 action=AgentAction.TOOL_CALL,
-                tool_call=ToolCall(id="invalid", name="lookup", arguments={"unknown": True}),
+                tool_call=ToolCall(id="invalid", name="lookup", arguments={"level": 7}),
             ),
             AgentDecision(
                 action=AgentAction.FINAL,
@@ -258,9 +275,131 @@ async def test_runtime_rejects_arguments_outside_discovered_mcp_schema() -> None
     )
     mcp = FakeMCPClient()
 
-    result = await AgentRuntime(llm, mcp).run(make_state())
+    grounded_state = make_state()
+    grounded_state.game_state.level = 7
+    result = await AgentRuntime(llm, mcp).run(grounded_state)
 
     assert result.status == AgentStatus.COMPLETED
     assert mcp.calls == []
     assert result.observations[0].error is not None
     assert result.observations[0].error.code == "INVALID_TOOL_ARGUMENTS"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_tool_argument_waits_without_execution() -> None:
+    llm = FakeLLMClient(
+        [
+            AgentDecision(
+                action=AgentAction.TOOL_CALL,
+                tool_call=ToolCall(id="unsupported", name="lookup", arguments={"level": 1}),
+            )
+        ]
+    )
+    mcp = ArgumentMCPClient()
+
+    result = await AgentRuntime(llm, mcp).run(make_state())
+
+    assert result.status == AgentStatus.WAITING_FOR_CONTEXT
+    assert mcp.calls == []
+    assert result.trace.tool_argument_validation.blocked_tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mismatched_tool_argument_claim_is_blocked() -> None:
+    call = ToolCall(
+        id="mismatch",
+        name="lookup",
+        arguments={"level": 8},
+        argument_claims=[
+            ToolArgumentClaim(argument_name="level", value=8, evidence_ref="game_state.level")
+        ],
+    )
+    state = make_state()
+    state.game_state.level = 7
+    mcp = ArgumentMCPClient()
+
+    result = await AgentRuntime(
+        FakeLLMClient([AgentDecision(action=AgentAction.TOOL_CALL, tool_call=call)]), mcp
+    ).run(state)
+
+    assert result.status == AgentStatus.WAITING_FOR_CONTEXT
+    assert mcp.calls == []
+    assert result.trace.tool_argument_validation.mismatched_argument_claims == 1
+
+
+@pytest.mark.asyncio
+async def test_supported_tool_argument_executes() -> None:
+    call = ToolCall(
+        id="supported",
+        name="lookup",
+        arguments={"level": 7},
+        argument_claims=[
+            ToolArgumentClaim(argument_name="level", value=7, evidence_ref="game_state.level")
+        ],
+    )
+    state = make_state()
+    state.game_state.level = 7
+    mcp = ArgumentMCPClient()
+    llm = FakeLLMClient(
+        [
+            AgentDecision(action=AgentAction.TOOL_CALL, tool_call=call),
+            AgentDecision(
+                action=AgentAction.FINAL,
+                final_response=FinalResponse(recommendation="Grounded result"),
+            ),
+        ]
+    )
+
+    result = await AgentRuntime(llm, mcp).run(state)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert len(mcp.calls) == 1
+    assert result.trace.tool_argument_validation.executed_tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_argument_reference_is_blocked() -> None:
+    call = ToolCall(
+        id="invalid-ref",
+        name="lookup",
+        arguments={"level": 7},
+        argument_claims=[
+            ToolArgumentClaim(argument_name="level", value=7, evidence_ref="game_state.fake_level")
+        ],
+    )
+    state = make_state()
+    state.game_state.level = 7
+    mcp = ArgumentMCPClient()
+
+    result = await AgentRuntime(
+        FakeLLMClient([AgentDecision(action=AgentAction.TOOL_CALL, tool_call=call)]), mcp
+    ).run(state)
+
+    assert result.status == AgentStatus.WAITING_FOR_CONTEXT
+    assert mcp.calls == []
+    assert result.trace.tool_argument_validation.invalid_reference_argument_claims == 1
+
+
+@pytest.mark.asyncio
+async def test_next_value_derivation_executes_when_current_value_is_evidence() -> None:
+    call = ToolCall(id="derived", name="lookup", arguments={"level": 8})
+    state = make_state()
+    state.game_state.level = 7
+    mcp = ArgumentMCPClient()
+    llm = FakeLLMClient(
+        [
+            AgentDecision(action=AgentAction.TOOL_CALL, tool_call=call),
+            AgentDecision(
+                action=AgentAction.FINAL,
+                final_response=FinalResponse(recommendation="Compared levels"),
+            ),
+        ]
+    )
+
+    result = await AgentRuntime(llm, mcp).run(state)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert len(mcp.calls) == 1
+    claim = mcp.calls[0].argument_claims[0]
+    assert claim.derivation is not None
+    assert claim.derivation.operation == "add"
