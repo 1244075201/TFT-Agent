@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tft-decision-agent"
+version = "0.1.0"
+description = "A maintainable foundation for a version-aware TFT decision agent."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mcp[cli]>=2,<3",
+  "pydantic>=2.12,<3",
+  "pydantic-settings>=2.2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.10,<2",
+  "pytest>=8.2,<9",
+  "pytest-asyncio>=0.23,<1",
+  "ruff>=0.5,<1",
+]
+
+[project.scripts]
+tft-agent = "tft_agent.app.main:main"
+tft-mcp-server = "tft_agent.tft_mcp_server.server:main"
+tft-sync-game-data = "tft_agent.ingestion.sync_game_data:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tft_agent"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".tools", ".uv-cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests"]
