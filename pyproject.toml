@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "mcp[cli]>=2,<3",
+  "openai>=1.99,<3",
   "pydantic>=2.12,<3",
   "pydantic-settings>=2.2,<3",
 ]
@@ -34,6 +35,7 @@ packages = ["src/tft_agent"]
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["real_llm: opt-in tests that call the configured external LLM provider"]
 
 [tool.ruff]
 line-length = 100
@@ -51,3 +53,8 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
+
+[dependency-groups]
+dev = [
+    "types-jsonschema>=4.26.0.20260518",
+]

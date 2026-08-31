@@ -19,3 +19,12 @@ class ToolNotFoundError(TFTAgentError):
 
 class ConfigurationError(TFTAgentError):
     """Raised when required application configuration is absent or invalid."""
+
+
+class LLMProviderError(LLMClientError):
+    """Normalized provider failure with a stable category and retry policy."""
+
+    def __init__(self, code: str, message: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable

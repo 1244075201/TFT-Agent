@@ -1,5 +1,8 @@
 """Central environment-backed application configuration."""
 
+from pathlib import Path
+from typing import Literal
+
 from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +22,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_steps: int = Field(default=8, ge=1, le=100)
     model: str = Field(default="deepseek-v4-flash", min_length=1)
+    thinking_mode: Literal["enabled", "disabled"] = "disabled"
+    llm_max_retries: int = Field(default=2, ge=0, le=5)
+    database_path: Path = Path("data/tft.sqlite3")
     deepseek_api_key: SecretStr | None = Field(
         default=None,
         validation_alias="DEEPSEEK_API_KEY",

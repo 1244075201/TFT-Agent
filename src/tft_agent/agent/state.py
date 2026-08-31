@@ -2,6 +2,7 @@
 
 from pydantic import Field, model_validator
 
+from tft_agent.agent.trace import AgentTrace
 from tft_agent.core.schemas import (
     AgentStatus,
     FinalResponse,
@@ -34,6 +35,7 @@ class AgentState(StrictModel):
     final_response: FinalResponse | None = None
     missing_context: list[str] = Field(default_factory=list)
     failure_reason: str | None = None
+    trace: AgentTrace = Field(default_factory=AgentTrace)
 
     @model_validator(mode="after")
     def validate_progress(self) -> "AgentState":
