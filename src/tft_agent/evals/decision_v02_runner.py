@@ -66,7 +66,11 @@ def build_decision_result(case: DecisionCase, state: AgentState) -> DecisionResu
     return DecisionResult(
         id=case.id,
         slice=case.slice,
-        passed=actual == case.expected_tool_sequence and state.status.value == case.expected_status,
+        passed=(
+            actual == case.expected_tool_sequence
+            and state.status.value == case.expected_status
+            and all(record.result.success for record in state.tool_history)
+        ),
         expected_tool_sequence=case.expected_tool_sequence,
         actual_tool_sequence=actual,
         final_status=state.status.value,
