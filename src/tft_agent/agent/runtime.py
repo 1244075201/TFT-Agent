@@ -38,6 +38,7 @@ class AgentRuntime:
             return state
 
         try:
+            state.trace.game_state_snapshot = state.game_state.model_dump(mode="json")
             tools = await self._mcp_client.list_tools()
             state.trace.available_tool_names = [tool.name for tool in tools]
             while state.step_count < state.max_steps:

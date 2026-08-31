@@ -87,13 +87,8 @@ def normalize_provider_response(
     if message is None:
         raise _malformed("DeepSeek response choice has no message")
     tool_calls = list(getattr(message, "tool_calls", None) or [])
-    if len(tool_calls) > 1:
-        raise LLMProviderError(
-            code="MULTIPLE_TOOL_CALLS_UNSUPPORTED",
-            message="Multiple simultaneous tool calls are not supported",
-            retryable=False,
-        )
     if tool_calls:
+        # Execute only the first returned call; the next step reassesses after real evidence.
         provider_call = tool_calls[0]
         function = getattr(provider_call, "function", None)
         call_id = getattr(provider_call, "id", None)
@@ -128,7 +123,8 @@ def normalize_provider_response(
     try:
         payload = json.loads(content)
     except json.JSONDecodeError:
-        return _plain_final(content)
+        embedded = _embedded_request_context(content)
+        return embedded if embedded is not None else _plain_final(content)
     if not isinstance(payload, dict):
         return _plain_final(content)
     if payload.get("action") == AgentAction.REQUEST_CONTEXT.value:
@@ -154,6 +150,25 @@ def normalize_provider_response(
             alternatives=_string_list(payload.get("alternatives")),
         ),
     )
+
+
+def _embedded_request_context(content: str) -> AgentDecision | None:
+    """Recognize the explicit decision contract even when surrounded by visible prose."""
+
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(content):
+        if character != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(content[index:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("action") != "request_context":
+            continue
+        missing = payload.get("missing_context")
+        if isinstance(missing, list) and missing and all(isinstance(item, str) for item in missing):
+            return AgentDecision(action=AgentAction.REQUEST_CONTEXT, missing_context=missing)
+    return None
 
 
 def _plain_final(content: str) -> AgentDecision:

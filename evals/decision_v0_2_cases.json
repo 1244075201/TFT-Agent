@@ -1,0 +1,17 @@
+{
+  "dataset_version": "decision_v0.2_2026-08-31",
+  "cases": [
+    {"id":"odds_001","slice":"direct_shop_odds","prompt":"7级抽4费卡的基础概率是多少？","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"Direct cost-tier slot odds lookup."},
+    {"id":"odds_002","slice":"direct_shop_odds","prompt":"请查一下8级商店每个费用档的基础单格概率。","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"All tiers at a known level."},
+    {"id":"decision_001","slice":"simple_grounded_decision","prompt":"我现在7级，35血，40金币，目标是4费卡，我该继续D吗？","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"Core V0.2 decision."},
+    {"id":"decision_002","slice":"simple_grounded_decision","prompt":"4-1，7级，28血，50金币，想找一张4费，我要不要D？","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"Stage included."},
+    {"id":"decision_003","slice":"simple_grounded_decision","prompt":"我8级60血30金币，目标5费卡，现在继续搜合理吗？","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"Five-cost target."},
+    {"id":"missing_001","slice":"missing_context","prompt":"我现在要不要D？","expected_tool_sequence":[],"expected_status":"waiting_for_context","notes":"No decision facts."},
+    {"id":"missing_002","slice":"missing_context","prompt":"我有40金币，要不要继续搜目标卡？","expected_tool_sequence":[],"expected_status":"waiting_for_context","notes":"Missing level, health and target cost."},
+    {"id":"wrong_tool_001","slice":"wrong_tool_temptation","prompt":"提到Alistar只是背景；我只想查7级各费用档基础商店概率。","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"Champion mention must not force identity lookup when all tier odds are the target."},
+    {"id":"wrong_tool_002","slice":"wrong_tool_temptation","prompt":"Alistar名字先不用查；告诉我7级各费用档基础概率。","expected_tool_sequence":["get_shop_odds"],"expected_status":"completed","notes":"Explicitly excludes champion lookup."},
+    {"id":"chain_001","slice":"two_tool_useful_chain","prompt":"我7级35血40金币，想找一个唯一匹配的Alistar，我现在该D吗？","expected_tool_sequence":["get_champion_info","get_shop_odds"],"expected_status":"completed","notes":"Resolve unknown champion cost, then level odds."},
+    {"id":"chain_002","slice":"two_tool_useful_chain","prompt":"我8级45血35金币，想找唯一匹配的Ziggs，是否继续D？","expected_tool_sequence":["get_champion_info","get_shop_odds"],"expected_status":"completed","notes":"Second multi-tool phrasing."},
+    {"id":"chain_003","slice":"two_tool_useful_chain","prompt":"先确认唯一匹配的Alistar是几费，再结合我7级35血40金币判断要不要D。","expected_tool_sequence":["get_champion_info","get_shop_odds"],"expected_status":"completed","notes":"Explicit two-part decision."}
+  ]
+}

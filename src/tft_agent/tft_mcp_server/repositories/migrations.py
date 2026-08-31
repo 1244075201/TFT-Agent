@@ -29,7 +29,24 @@ MIGRATIONS = [
     );
     CREATE INDEX IF NOT EXISTS idx_champions_name_version
         ON champions(name COLLATE NOCASE, data_version);
+    """,
     """
+    CREATE TABLE shop_odds (
+        game_patch TEXT NOT NULL,
+        source_version TEXT NOT NULL,
+        level INTEGER NOT NULL CHECK (level BETWEEN 1 AND 10),
+        cost_1_probability REAL NOT NULL CHECK (cost_1_probability BETWEEN 0 AND 1),
+        cost_2_probability REAL NOT NULL CHECK (cost_2_probability BETWEEN 0 AND 1),
+        cost_3_probability REAL NOT NULL CHECK (cost_3_probability BETWEEN 0 AND 1),
+        cost_4_probability REAL NOT NULL CHECK (cost_4_probability BETWEEN 0 AND 1),
+        cost_5_probability REAL NOT NULL CHECK (cost_5_probability BETWEEN 0 AND 1),
+        source TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL,
+        PRIMARY KEY (game_patch, source_version, level)
+    );
+    CREATE INDEX idx_shop_odds_patch_level ON shop_odds(game_patch, level);
+    """,
 ]
 
 

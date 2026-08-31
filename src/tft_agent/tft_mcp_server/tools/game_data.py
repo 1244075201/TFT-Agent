@@ -99,15 +99,41 @@ class GameDataTools:
         )
 
     async def get_shop_odds(self, call_id: str, arguments: dict[str, Any]) -> ToolResult:
-        patch = _optional_string(arguments, "patch")
         level = arguments.get("level")
         if not isinstance(level, int) or isinstance(level, bool):
             raise ValueError("level must be an integer")
-        value = await self._repository.get_shop_odds(level, patch)
-        return (
-            found_result(call_id, value.model_dump(), patch)
-            if value
-            else not_found_result(call_id, f"shop odds for level {level}", patch)
+        game_patch = _optional_string(arguments, "game_patch")
+        value = await self._repository.get_shop_odds(level, game_patch)
+        if value is None:
+            return ToolResult(
+                tool_call_id=call_id,
+                success=False,
+                metadata=ToolMetadata(game_patch=game_patch),
+                error=ToolError(
+                    code="SHOP_ODDS_NOT_FOUND",
+                    message=f"No synchronized shop odds found for level {level}",
+                ),
+            )
+        return ToolResult(
+            tool_call_id=call_id,
+            success=True,
+            data={
+                "level": value.level,
+                "odds": {
+                    "cost_1": value.cost_1_probability,
+                    "cost_2": value.cost_2_probability,
+                    "cost_3": value.cost_3_probability,
+                    "cost_4": value.cost_4_probability,
+                    "cost_5": value.cost_5_probability,
+                },
+                "source_version": value.source_version,
+            },
+            metadata=ToolMetadata(
+                game_patch=value.game_patch,
+                source=value.source,
+                source_type=value.source_type,
+                retrieved_at=value.retrieved_at,
+            ),
         )
 
 

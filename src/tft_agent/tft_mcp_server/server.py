@@ -41,6 +41,18 @@ def create_server(repository: GameDataRepository) -> MCPServer:
             data_version=data_version,
         )
 
+    @server.tool()
+    async def get_shop_odds(level: int, game_patch: str | None = None) -> ToolResult:
+        """ONLY retrieve base per-shop-slot probabilities for cost tiers 1 through 5 at a player
+        level. It does not recommend rolling or leveling and does not calculate an exact champion
+        hit chance, pool depletion, opponent holdings, or meta strategy.
+        """
+
+        return await tools.get_shop_odds(
+            call_id="mcp-transport",
+            arguments={"level": level, "game_patch": game_patch},
+        )
+
     return server
 
 

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from tft_agent.core.schemas import StrictModel
 
@@ -51,9 +51,35 @@ class TraitInfo(StrictModel):
     associated_champions: list[str]
 
 
-class ShopOdds(StrictModel):
+class ShopOddsRecord(StrictModel):
+    """Normalized per-slot shop cost-tier probabilities with provenance."""
+
     level: int = Field(ge=1, le=10)
-    probabilities_by_cost: dict[int, float]
+    cost_1_probability: float = Field(ge=0, le=1)
+    cost_2_probability: float = Field(ge=0, le=1)
+    cost_3_probability: float = Field(ge=0, le=1)
+    cost_4_probability: float = Field(ge=0, le=1)
+    cost_5_probability: float = Field(ge=0, le=1)
+    game_patch: str
+    source_version: str
+    source: str
+    source_type: str
+    retrieved_at: datetime
+
+    @model_validator(mode="after")
+    def validate_probability_sum(self) -> "ShopOddsRecord":
+        total = sum(
+            (
+                self.cost_1_probability,
+                self.cost_2_probability,
+                self.cost_3_probability,
+                self.cost_4_probability,
+                self.cost_5_probability,
+            )
+        )
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError("shop cost-tier probabilities must sum to 1.0")
+        return self
 
 
 class KnowledgeChunk(StrictModel):

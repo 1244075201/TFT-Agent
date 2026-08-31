@@ -8,7 +8,7 @@ from tft_agent.tft_mcp_server.schemas import (
     ChampionImage,
     ChampionRecord,
     ItemInfo,
-    ShopOdds,
+    ShopOddsRecord,
     TraitInfo,
 )
 from tft_agent.tft_mcp_server.tools.game_data import GameDataTools
@@ -27,8 +27,13 @@ def champion(champion_id: str, name: str = "Fixture Champion") -> ChampionRecord
 
 
 class FakeGameDataRepository:
-    def __init__(self, candidates: list[ChampionRecord]) -> None:
+    def __init__(
+        self,
+        candidates: list[ChampionRecord],
+        shop_odds: ShopOddsRecord | None = None,
+    ) -> None:
         self.candidates = candidates
+        self.shop_odds = shop_odds
 
     async def replace_champions(
         self,
@@ -52,8 +57,11 @@ class FakeGameDataRepository:
     async def get_trait(self, name: str, patch: str | None) -> TraitInfo | None:
         return None
 
-    async def get_shop_odds(self, level: int, patch: str | None) -> ShopOdds | None:
-        return None
+    async def replace_shop_odds(self, records: Sequence[ShopOddsRecord]) -> None:
+        raise AssertionError("not used")
+
+    async def get_shop_odds(self, level: int, game_patch: str | None) -> ShopOddsRecord | None:
+        return self.shop_odds
 
 
 @pytest.mark.asyncio
@@ -91,3 +99,37 @@ async def test_champion_tool_preserves_ambiguity() -> None:
     assert result.error.resolution == ToolErrorResolution.REQUEST_CONTEXT
     assert isinstance(result.data, dict)
     assert len(result.data["candidates"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_shop_odds_tool_returns_structured_probabilities_and_provenance() -> None:
+    record = ShopOddsRecord(
+        level=7,
+        cost_1_probability=0.16,
+        cost_2_probability=0.30,
+        cost_3_probability=0.43,
+        cost_4_probability=0.10,
+        cost_5_probability=0.01,
+        game_patch="16.17",
+        source_version="set18-fixture",
+        source="fixture-source",
+        source_type="community_reference",
+        retrieved_at=datetime.now(UTC),
+    )
+    result = await GameDataTools(FakeGameDataRepository([], record)).get_shop_odds(
+        "shop-1", {"level": 7}
+    )
+
+    assert result.success is True
+    assert isinstance(result.data, dict)
+    assert result.data["odds"]["cost_4"] == 0.10
+    assert result.metadata.source_type == "community_reference"
+
+
+@pytest.mark.asyncio
+async def test_shop_odds_tool_returns_structured_not_found() -> None:
+    result = await GameDataTools(FakeGameDataRepository([])).get_shop_odds("shop-2", {"level": 7})
+
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code == "SHOP_ODDS_NOT_FOUND"

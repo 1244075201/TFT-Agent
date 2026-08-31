@@ -11,7 +11,7 @@ from tft_agent.tft_mcp_server.schemas import (
     ChampionImage,
     ChampionRecord,
     ItemInfo,
-    ShopOdds,
+    ShopOddsRecord,
     TraitInfo,
 )
 
@@ -54,8 +54,11 @@ class SQLiteGameDataRepository:
     async def get_trait(self, name: str, patch: str | None) -> TraitInfo | None:
         return None
 
-    async def get_shop_odds(self, level: int, patch: str | None) -> ShopOdds | None:
-        return None
+    async def replace_shop_odds(self, records: Sequence[ShopOddsRecord]) -> None:
+        await asyncio.to_thread(self._replace_shop_odds_sync, list(records))
+
+    async def get_shop_odds(self, level: int, game_patch: str | None) -> ShopOddsRecord | None:
+        return await asyncio.to_thread(self._get_shop_odds_sync, level, game_patch)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
@@ -123,6 +126,54 @@ class SQLiteGameDataRepository:
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
         return [self._row_to_record(row) for row in rows]
+
+    def _replace_shop_odds_sync(self, records: list[ShopOddsRecord]) -> None:
+        if not records:
+            raise ValueError("shop odds synchronization requires records")
+        patch = records[0].game_patch
+        source_version = records[0].source_version
+        if any(
+            record.game_patch != patch or record.source_version != source_version
+            for record in records
+        ):
+            raise ValueError("shop odds records must share patch and source_version")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM shop_odds WHERE game_patch = ? AND source_version = ?",
+                (patch, source_version),
+            )
+            connection.executemany(
+                "INSERT INTO shop_odds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        record.game_patch,
+                        record.source_version,
+                        record.level,
+                        record.cost_1_probability,
+                        record.cost_2_probability,
+                        record.cost_3_probability,
+                        record.cost_4_probability,
+                        record.cost_5_probability,
+                        record.source,
+                        record.source_type,
+                        record.retrieved_at.isoformat(),
+                    )
+                    for record in records
+                ],
+            )
+
+    def _get_shop_odds_sync(self, level: int, game_patch: str | None) -> ShopOddsRecord | None:
+        clauses = ["level = ?"]
+        parameters: list[object] = [level]
+        if game_patch is not None:
+            clauses.append("game_patch = ?")
+            parameters.append(game_patch)
+        query = "SELECT * FROM shop_odds WHERE " + " AND ".join(clauses)
+        query += " ORDER BY retrieved_at DESC LIMIT 1"
+        with self._connect() as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return ShopOddsRecord.model_validate(dict(row)) if row is not None else None
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ChampionRecord:

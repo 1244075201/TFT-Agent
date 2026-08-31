@@ -174,7 +174,7 @@ async def test_hardening_b_capabilities_follow_registry() -> None:
 
     assert result.status == AgentStatus.COMPLETED
     assert result.tool_history == []
-    assert result.trace.available_tool_names == ["get_champion_info"]
+    assert result.trace.available_tool_names == ["get_champion_info", "get_shop_odds"]
     assert result.final_response is not None
 
 

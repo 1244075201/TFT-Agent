@@ -50,6 +50,8 @@ class GameState(StrictModel):
     traits: list[TraitState] = Field(default_factory=list)
     augments: list[str] = Field(default_factory=list)
     shop: list[UnitState] = Field(default_factory=list)
+    target_champion: str | None = None
+    target_cost: int | None = Field(default=None, ge=1, le=5)
     user_question: str | None = None
 
 

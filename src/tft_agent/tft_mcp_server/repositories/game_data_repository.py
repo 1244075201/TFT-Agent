@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from tft_agent.tft_mcp_server.schemas import ChampionRecord, ItemInfo, ShopOdds, TraitInfo
+from tft_agent.tft_mcp_server.schemas import ChampionRecord, ItemInfo, ShopOddsRecord, TraitInfo
 
 
 class GameDataRepository(Protocol):
@@ -28,4 +28,6 @@ class GameDataRepository(Protocol):
 
     async def get_trait(self, name: str, patch: str | None) -> TraitInfo | None: ...
 
-    async def get_shop_odds(self, level: int, patch: str | None) -> ShopOdds | None: ...
+    async def replace_shop_odds(self, records: Sequence[ShopOddsRecord]) -> None: ...
+
+    async def get_shop_odds(self, level: int, game_patch: str | None) -> ShopOddsRecord | None: ...

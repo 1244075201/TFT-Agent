@@ -1,6 +1,7 @@
 """Small structured trace models that exclude prompts, secrets, and hidden reasoning."""
 
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from pydantic import Field
@@ -37,6 +38,7 @@ class AgentTrace(StrictModel):
     available_tool_names: list[str] = Field(default_factory=list)
     final_used_tools: list[str] = Field(default_factory=list)
     final_sources: list[str] = Field(default_factory=list)
+    game_state_snapshot: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def total_latency_ms(self) -> float | None:

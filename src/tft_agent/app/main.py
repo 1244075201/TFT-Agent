@@ -5,11 +5,12 @@ import logging
 import sys
 from pathlib import Path
 
+from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.response_formatter import ResponseFormatter
 from tft_agent.agent.runtime import AgentRuntime
 from tft_agent.agent.state import AgentState
 from tft_agent.core.config import Settings
-from tft_agent.core.schemas import AgentStatus, GameState
+from tft_agent.core.schemas import AgentStatus
 from tft_agent.llm.deepseek_client import DeepSeekLLMClient
 from tft_agent.mcp_client.stdio_client import StdioMCPClient
 
@@ -40,7 +41,7 @@ async def _run_once(settings: Settings) -> None:
         str(database_path),
     ]
     state = AgentState(
-        game_state=GameState(user_question=question),
+        game_state=GameStateParser().parse_text(question),
         goal=question,
         max_steps=settings.max_steps,
     )

@@ -219,7 +219,7 @@ async def test_malformed_function_arguments_fail_before_tool_execution() -> None
 
 
 @pytest.mark.asyncio
-async def test_multiple_tool_calls_are_explicitly_rejected() -> None:
+async def test_multiple_tool_calls_execute_only_the_first_in_returned_order() -> None:
     create = AsyncMock(
         return_value=response(
             tool_calls=[
@@ -229,10 +229,24 @@ async def test_multiple_tool_calls_are_explicitly_rejected() -> None:
         )
     )
 
-    with pytest.raises(LLMProviderError) as error:
-        await client_with_create(create).generate(state(), [tool_definition()])
+    decision = await client_with_create(create).generate(state(), [tool_definition()])
 
-    assert error.value.code == "MULTIPLE_TOOL_CALLS_UNSUPPORTED"
+    assert decision.tool_call is not None
+    assert decision.tool_call.id == "one"
+
+
+@pytest.mark.asyncio
+async def test_request_context_contract_is_recognized_inside_visible_prose() -> None:
+    create = AsyncMock(
+        return_value=response(
+            content='Please clarify. {"action":"request_context","missing_context":["level"]}'
+        )
+    )
+
+    decision = await client_with_create(create).generate(state(), [tool_definition()])
+
+    assert decision.action == AgentAction.REQUEST_CONTEXT
+    assert decision.missing_context == ["level"]
 
 
 @pytest.mark.asyncio

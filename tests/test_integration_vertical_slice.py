@@ -24,6 +24,7 @@ from tft_agent.mcp_client.stdio_client import StdioMCPClient
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
+from tft_agent.tft_mcp_server.schemas import ShopOddsRecord
 
 FIXTURE_DOCUMENT = {
     "type": "tft-champion",
@@ -86,6 +87,23 @@ async def seed_database(database_path: Path) -> None:
     repository = SQLiteGameDataRepository(database_path)
     await repository.initialize()
     await repository.replace_champions(records, document.version, timestamp)
+    await repository.replace_shop_odds(
+        [
+            ShopOddsRecord(
+                level=7,
+                cost_1_probability=0.16,
+                cost_2_probability=0.30,
+                cost_3_probability=0.43,
+                cost_4_probability=0.10,
+                cost_5_probability=0.01,
+                game_patch="fixture-patch",
+                source_version="fixture-shop-version",
+                source="test-fixture",
+                source_type="test_fixture",
+                retrieved_at=timestamp,
+            )
+        ]
+    )
 
 
 def make_client(database_path: Path) -> StdioMCPClient:
@@ -108,12 +126,21 @@ async def test_stdio_list_and_unique_not_found_and_ambiguous(tmp_path: Path) -> 
 
     async with make_client(database_path) as client:
         tools = await client.list_tools()
-        assert [tool.name for tool in tools] == ["get_champion_info"]
+        assert [tool.name for tool in tools] == ["get_champion_info", "get_shop_odds"]
         assert set(tools[0].input_schema["properties"]) == {
             "name",
             "champion_id",
             "data_version",
         }
+        assert set(tools[1].input_schema["properties"]) == {"level", "game_patch"}
+
+        odds = await client.call_tool(
+            ToolCall(id="odds", name="get_shop_odds", arguments={"level": 7})
+        )
+        assert odds.success is True
+        assert isinstance(odds.data, dict)
+        assert odds.data["odds"]["cost_4"] == 0.10
+        assert odds.metadata.game_patch == "fixture-patch"
 
         unique = await client.call_tool(
             ToolCall(id="unique", name="get_champion_info", arguments={"name": "Unique Hero"})
