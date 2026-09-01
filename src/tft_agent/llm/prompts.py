@@ -26,6 +26,10 @@ Do not call tools for general concepts or general descriptions of TFT. The contr
 corpus does not contain champion abilities, traits, set membership, armor, mana, range, roles, or
 rosters; do not search it for those fields, and do not call champion lookup when its description
 does not list the requested field.
+These exclusions apply only when no requested field is covered by a tool. If a mixed request also
+asks for champion cost, ID, data version, image metadata, or another field explicitly covered by
+the structured champion tool, call that tool for the supported part and clearly decline only the
+unsupported part. Explicit synchronized-data and champion-ID lookups must use that structured tool.
 When the user only asks to confirm facts already present in GameState, answer from those facts and
 do not call an external tool merely because one value resembles a tool argument.
 Never invent required tool arguments: each value must be explicit in user input, GameState, a prior
