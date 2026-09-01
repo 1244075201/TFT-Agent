@@ -15,6 +15,8 @@ def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
     game_state = state.game_state.model_dump(mode="json", exclude_none=True)
     _register_scalars(registry, game_state, "game_state")
     registry["task.goal"] = state.goal
+    if state.current_patch is not None:
+        registry["agent.game_patch"] = state.current_patch
     for record in state.tool_history:
         prefix = f"tool.{record.tool_call.id}"
         if isinstance(record.result.data, dict):

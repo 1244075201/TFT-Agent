@@ -43,6 +43,7 @@ async def _run_once(settings: Settings) -> None:
     state = AgentState(
         game_state=GameStateParser().parse_text(question),
         goal=question,
+        current_patch=settings.current_game_patch,
         max_steps=settings.max_steps,
     )
     try:

@@ -8,10 +8,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.runtime import AgentRuntime
 from tft_agent.agent.state import AgentState
 from tft_agent.core.config import Settings
-from tft_agent.core.schemas import GameState
 from tft_agent.evals.metrics import classify, summarize, summarize_by_slice
 from tft_agent.evals.schemas import BenchmarkResult, CaseResult, GoldenSet, ToolSelectionCase
 from tft_agent.llm.deepseek_client import DeepSeekLLMClient
@@ -84,8 +84,9 @@ async def run_case(
     """Execute one independent task and extract visible trace data."""
 
     state = AgentState(
-        game_state=GameState(user_question=case.prompt),
+        game_state=GameStateParser().parse_text(case.prompt),
         goal=case.prompt,
+        current_patch=settings.current_game_patch,
         max_steps=settings.max_steps,
     )
     result = await AgentRuntime(llm, mcp).run(state)

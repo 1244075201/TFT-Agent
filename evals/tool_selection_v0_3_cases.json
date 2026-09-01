@@ -1,0 +1,32 @@
+{
+  "dataset_version": "tool_selection_v0.3.0_2026-09-02",
+  "policy": "Use local Riot knowledge for current patch/set/mechanics, structured champion data for champion identity/cost, and structured shop data only for explicitly available historical patch 16.17. Unsupported strategy and unrelated questions are no_call.",
+  "cases": [
+    {"id":"knowledge_001","slice":"knowledge_current","prompt":"请查 Riot 官方资料：18.1 版本的开局奇遇有什么变化？","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Current patch notes."},
+    {"id":"knowledge_002","slice":"knowledge_current","prompt":"Enchanted Wilds 的 Wisp 机制是什么？请以本地 Riot 资料为准。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Set mechanic."},
+    {"id":"knowledge_003","slice":"knowledge_current","prompt":"Set 18 的正式名称和主题是什么？请查询官方知识库。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Set overview."},
+    {"id":"knowledge_004","slice":"knowledge_current","prompt":"18.1 版本 Carousel 系统有什么改动？","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Patch systems."},
+    {"id":"knowledge_005","slice":"knowledge_current","prompt":"Wisps 在商店中多久出现一次？请查证当前 Set 18 官方资料。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Mechanic detail."},
+    {"id":"knowledge_006","slice":"knowledge_current","prompt":"Patch 18.1 的 PvE loot 规则是什么？只根据本地版本化知识回答。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Patch fact."},
+    {"id":"knowledge_none_001","slice":"knowledge_no_answer","prompt":"请查本地 Riot 知识库：18.1 的排位赛结算奖励是什么？没有证据就明确说不知道。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Current-patch no-answer must not use model memory."},
+    {"id":"knowledge_old_001","slice":"knowledge_no_answer","prompt":"请查询 17.9 版本的 Wisp 机制；本地没有该版本证据时不要用当前版本替代。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Old patch filter must return no current-patch contamination."},
+    {"id":"champion_001","slice":"structured_champion","prompt":"Alistar 在已同步 Data Dragon 数据中是几费卡？","expected_tool_behavior":"call","expected_tool_name":"get_champion_info","notes":"Structured cost."},
+    {"id":"champion_002","slice":"structured_champion","prompt":"查询 Alistar 的 champion ID。","expected_tool_behavior":"call","expected_tool_name":"get_champion_info","notes":"Structured identity."},
+    {"id":"champion_003","slice":"structured_champion","prompt":"查询 champion ID 为 TFT16_Shen 的结构化信息。","expected_tool_behavior":"call","expected_tool_name":"get_champion_info","notes":"Explicit disambiguation."},
+    {"id":"champion_004","slice":"structured_champion","prompt":"Alistar 的 Data Dragon data version 是多少？","expected_tool_behavior":"call","expected_tool_name":"get_champion_info","notes":"Structured version."},
+    {"id":"shop_001","slice":"structured_shop","prompt":"查一下补丁 16.17 的 7 级商店费用概率。","expected_tool_behavior":"call","expected_tool_name":"get_shop_odds","notes":"Available historical snapshot."},
+    {"id":"shop_002","slice":"structured_shop","prompt":"补丁 16.17 中，8级每个费用档的基础单格概率是多少？","expected_tool_behavior":"call","expected_tool_name":"get_shop_odds","notes":"Available historical snapshot."},
+    {"id":"shop_003","slice":"structured_shop","prompt":"请从结构化数据库查询 16.17 版本 9 级 shop odds。","expected_tool_behavior":"call","expected_tool_name":"get_shop_odds","notes":"Structured odds."},
+    {"id":"shop_004","slice":"structured_shop","prompt":"16.17 补丁 6 级抽各费用棋子的概率是多少？","expected_tool_behavior":"call","expected_tool_name":"get_shop_odds","notes":"Structured odds."},
+    {"id":"no_tool_001","slice":"unsupported_strategy","prompt":"Alistar 最强装备是什么？不要猜。","expected_tool_behavior":"no_call","expected_tool_name":null,"notes":"No strategy corpus."},
+    {"id":"no_tool_002","slice":"unsupported_strategy","prompt":"当前版本最强上分阵容是什么？","expected_tool_behavior":"no_call","expected_tool_name":null,"notes":"No meta corpus."},
+    {"id":"no_tool_003","slice":"unsupported_strategy","prompt":"给我推荐一个 Wisp 阵容站位。","expected_tool_behavior":"no_call","expected_tool_name":null,"notes":"Mechanic evidence is not strategy evidence."},
+    {"id":"no_tool_004","slice":"unsupported_strategy","prompt":"哪个社区攻略作者最可靠？","expected_tool_behavior":"no_call","expected_tool_name":null,"notes":"No community corpus."},
+    {"id":"no_tool_005","slice":"general_no_tool","prompt":"解释一下 MCP 和 Function Calling 的区别。","expected_tool_behavior":"no_call","expected_tool_name":null,"notes":"General architecture."},
+    {"id":"no_tool_006","slice":"general_no_tool","prompt":"你能帮助我做什么？","expected_tool_behavior":"no_call","expected_tool_name":null,"notes":"Capability question."},
+    {"id":"boundary_001","slice":"structured_boundary","prompt":"Alistar 是几费卡？只查询结构化同步数据，不要搜索攻略。","expected_tool_behavior":"call","expected_tool_name":"get_champion_info","notes":"RAG must not replace champion lookup."},
+    {"id":"boundary_002","slice":"structured_boundary","prompt":"查询 16.17 的 7 级商店概率，不要使用知识库文章。","expected_tool_behavior":"call","expected_tool_name":"get_shop_odds","notes":"RAG must not replace shop lookup."},
+    {"id":"boundary_003","slice":"knowledge_boundary","prompt":"请查官方资料确认 Enchanted Wilds 的主题；不要查询棋子费用或商店概率。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Structured tools are irrelevant."},
+    {"id":"boundary_004","slice":"knowledge_boundary","prompt":"18.1 的 Opening Encounter 有哪些规则？需要给出来源。","expected_tool_behavior":"call","expected_tool_name":"search_game_knowledge","notes":"Provenance-needed knowledge."}
+  ]
+}

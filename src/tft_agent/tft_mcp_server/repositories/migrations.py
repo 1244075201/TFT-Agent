@@ -47,6 +47,24 @@ MIGRATIONS = [
     );
     CREATE INDEX idx_shop_odds_patch_level ON shop_odds(game_patch, level);
     """,
+    """
+    CREATE TABLE knowledge_documents (
+        document_id TEXT PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL,
+        source TEXT NOT NULL, source_type TEXT NOT NULL, document_type TEXT NOT NULL,
+        game_patch TEXT, set_name TEXT, language TEXT NOT NULL, published_at TEXT,
+        retrieved_at TEXT NOT NULL, url TEXT NOT NULL
+    );
+    CREATE TABLE knowledge_chunks (
+        chunk_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+        heading TEXT, text TEXT NOT NULL, embedding BLOB NOT NULL, embedding_model TEXT NOT NULL,
+        embedding_model_revision TEXT, embedding_dimension INTEGER NOT NULL,
+        embedded_at TEXT NOT NULL,
+        FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE,
+        UNIQUE(document_id, chunk_index, embedding_model)
+    );
+    CREATE INDEX idx_knowledge_documents_patch ON knowledge_documents(game_patch);
+    CREATE INDEX idx_knowledge_documents_set ON knowledge_documents(set_name);
+    """,
 ]
 
 

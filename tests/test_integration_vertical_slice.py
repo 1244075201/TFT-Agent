@@ -126,7 +126,11 @@ async def test_stdio_list_and_unique_not_found_and_ambiguous(tmp_path: Path) -> 
 
     async with make_client(database_path) as client:
         tools = await client.list_tools()
-        assert [tool.name for tool in tools] == ["get_champion_info", "get_shop_odds"]
+        assert [tool.name for tool in tools] == [
+            "get_champion_info",
+            "get_shop_odds",
+            "search_game_knowledge",
+        ]
         assert set(tools[0].input_schema["properties"]) == {
             "name",
             "champion_id",

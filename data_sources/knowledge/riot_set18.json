@@ -1,0 +1,44 @@
+[
+  {
+    "document_id": "riot-tft-18.1-systems",
+    "title": "Teamfight Tactics patch 18.1 — Systems",
+    "content": "# Patch 18.1\n\n## Systems\n\nPatch 18.1 launches Enchanted Wilds on live. The Carousel returns. Units no longer retarget after returning from crowd control. Loot missed from Stage 4-7 or later PvE rounds can overflow to the next PvE round.\n\n## Opening Encounters\n\nNew opening encounters include Completed Item Anvil Start, Reroll Subscription, and Item Forge. Loot Subscription, Artifact Anvil, and Reroll Start were removed.",
+    "source": "Riot Games TFT Patch Notes",
+    "source_type": "riot_official",
+    "document_type": "patch_notes",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": "2026-08-25T18:00:00Z",
+    "retrieved_at": "2026-09-01T00:00:00Z",
+    "url": "https://teamfighttactics.leagueoflegends.com/en-sg/news/game-updates/teamfight-tactics-patch-18-1/"
+  },
+  {
+    "document_id": "riot-tft-set18-wisps",
+    "title": "Enchanted Wilds — Wisp mechanic",
+    "content": "# Enchanted Wilds\n\n## Set Mechanic: Wisps\n\nWisps are split into seven categories: Champion, Combat, Misc, Shop, Gold/XP, Risky, and Item. They can only be purchased during the planning phase. A Wisp disappears after planning and reveals the unit hiding behind it. Wisps appear in every other shop. After Stage 5, every other Wisp is guaranteed to be a Combat Wisp.",
+    "source": "Riot Games TFT Patch Notes",
+    "source_type": "riot_official",
+    "document_type": "set_overview",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": "2026-08-25T18:00:00Z",
+    "retrieved_at": "2026-09-01T00:00:00Z",
+    "url": "https://teamfighttactics.leagueoflegends.com/en-sg/news/game-updates/teamfight-tactics-patch-18-1/"
+  },
+  {
+    "document_id": "riot-tft-set18-overview",
+    "title": "TFT Set 18: Enchanted Wilds overview",
+    "content": "# Set 18\n\n## Enchanted Wilds\n\nEnchanted Wilds is Teamfight Tactics Set 18. Its theme is a forest filled with wild magic, Riftbeasts, Elderwood, a Yeti, and Wisps. Wisps grant unusual abilities and form the set's central mechanic.",
+    "source": "Riot Games TFT",
+    "source_type": "riot_official",
+    "document_type": "set_overview",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": "2026-08-26T16:00:00Z",
+    "retrieved_at": "2026-09-01T00:00:00Z",
+    "url": "https://teamfighttactics.leagueoflegends.com/en-us/"
+  }
+]

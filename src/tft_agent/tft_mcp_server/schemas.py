@@ -83,9 +83,47 @@ class ShopOddsRecord(StrictModel):
 
 
 class KnowledgeChunk(StrictModel):
+    chunk_id: str
+    document_id: str
+    title: str
+    heading: str | None = None
     text: str
     source: str
     source_type: str
+    document_type: str
     game_patch: str | None = None
-    relevance_score: float | None = Field(default=None, ge=0)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    set_name: str | None = None
+    language: str
+    url: str
+    published_at: datetime | None = None
+    retrieved_at: datetime
+    embedding_model: str | None = None
+    relevance_score: float | None = Field(default=None, ge=-1, le=1)
+
+
+class KnowledgeDocument(StrictModel):
+    """Normalized source snapshot without storage-specific embedding fields."""
+
+    document_id: str
+    title: str
+    content: str
+    source: str
+    source_type: str
+    document_type: str
+    game_patch: str | None = None
+    set_name: str | None = None
+    language: str
+    published_at: datetime | None = None
+    retrieved_at: datetime
+    url: str
+
+
+class KnowledgeChunkRecord(KnowledgeChunk):
+    """Indexable chunk with embedding version metadata."""
+
+    chunk_index: int = Field(ge=0)
+    embedding: list[float]
+    embedding_model: str
+    embedding_model_revision: str | None = None
+    embedding_dimension: int = Field(gt=0)
+    embedded_at: datetime

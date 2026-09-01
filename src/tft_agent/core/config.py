@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     thinking_mode: Literal["enabled", "disabled"] = "disabled"
     llm_max_retries: int = Field(default=2, ge=0, le=5)
     database_path: Path = Path("data/tft.sqlite3")
+    current_game_patch: str = "18.1"
+    current_set_name: str = "Enchanted Wilds"
+    embedding_model: str = "intfloat/multilingual-e5-small"
+    embedding_device: str = "cpu"
+    retrieval_threshold: float = Field(default=0.78, ge=-1, le=1)
     deepseek_api_key: SecretStr | None = Field(
         default=None,
         validation_alias="DEEPSEEK_API_KEY",

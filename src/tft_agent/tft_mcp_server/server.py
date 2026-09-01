@@ -5,15 +5,24 @@ from pathlib import Path
 
 from mcp.server import MCPServer
 
+from tft_agent.core.config import Settings
 from tft_agent.core.schemas import ToolResult
+from tft_agent.embeddings.local_e5 import LocalE5EmbeddingClient
 from tft_agent.tft_mcp_server.repositories.game_data_repository import GameDataRepository
+from tft_agent.tft_mcp_server.repositories.knowledge_repository import KnowledgeRepository
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
+from tft_agent.tft_mcp_server.repositories.sqlite_knowledge_repository import (
+    SQLiteKnowledgeRepository,
+)
 from tft_agent.tft_mcp_server.tools.game_data import GameDataTools
+from tft_agent.tft_mcp_server.tools.knowledge import KnowledgeTools
 
 
-def create_server(repository: GameDataRepository) -> MCPServer:
+def create_server(
+    repository: GameDataRepository, knowledge_repository: KnowledgeRepository | None = None
+) -> MCPServer:
     """Create a server with dependencies injected and no import-time global state."""
 
     server = MCPServer(
@@ -55,6 +64,37 @@ def create_server(repository: GameDataRepository) -> MCPServer:
             arguments={"level": level, "game_patch": game_patch},
         )
 
+    if knowledge_repository is not None:
+        knowledge = KnowledgeTools(knowledge_repository)
+
+        @server.tool()
+        async def search_game_knowledge(
+            query: str,
+            top_k: int = 4,
+            game_patch: str | None = None,
+            set_name: str | None = None,
+            document_type: str | None = None,
+        ) -> ToolResult:
+            """Search local versioned evidence for official patch notes, set overviews, and set
+            mechanics. Do not use for strategy, meta strength, compositions, items, positioning,
+            community-author recommendations, structured champion data, shop odds, exact hit or
+            pool calculations, champion abilities/traits/set membership/stats/roles, general TFT
+            descriptions, general concepts, or facts already present in GameState. Results are
+            factual evidence, not strategy conclusions. Copy the user's complete question unchanged
+            into query. Omit optional filters and top_k unless grounded in task evidence.
+            """
+
+            return await knowledge.search_game_knowledge(
+                "mcp-transport",
+                {
+                    "query": query,
+                    "top_k": top_k,
+                    "game_patch": game_patch,
+                    "set_name": set_name,
+                    "document_type": document_type,
+                },
+            )
+
     return server
 
 
@@ -66,7 +106,13 @@ def main() -> None:
     args = parser.parse_args()
     repository = SQLiteGameDataRepository(args.database.resolve())
     repository.initialize_sync()
-    create_server(repository).run()
+    settings = Settings()
+    embeddings = LocalE5EmbeddingClient(settings.embedding_model, settings.embedding_device)
+    knowledge = SQLiteKnowledgeRepository(
+        args.database.resolve(), embeddings, settings.retrieval_threshold
+    )
+    knowledge.initialize_sync()
+    create_server(repository, knowledge).run()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,17 @@
+{
+  "dataset_version": "retrieval_v0.3.0_2026-09-01",
+  "cases": [
+    {"id":"patch_001","query":"当前18.1版本主要有哪些改动？","game_patch":"18.1","expected_document_ids":["riot-tft-18.1-systems"],"no_answer":false},
+    {"id":"patch_002","query":"Carousel在18.1发生了什么变化？","game_patch":"18.1","expected_document_ids":["riot-tft-18.1-systems"],"no_answer":false},
+    {"id":"patch_003","query":"18.1中crowd control结束后单位还会重新选择目标吗？","game_patch":"18.1","expected_document_ids":["riot-tft-18.1-systems"],"no_answer":false},
+    {"id":"patch_004","query":"Which opening encounters were removed in patch 18.1?","game_patch":"18.1","expected_document_ids":["riot-tft-18.1-systems"],"no_answer":false},
+    {"id":"mechanic_001","query":"Set 18的Wisp精灵机制是什么？","game_patch":"18.1","expected_document_ids":["riot-tft-set18-wisps","riot-tft-set18-overview"],"no_answer":false},
+    {"id":"mechanic_002","query":"Wisp精灵在planning phase什么时候可以买？","game_patch":"18.1","expected_document_ids":["riot-tft-set18-wisps"],"no_answer":false},
+    {"id":"mechanic_003","query":"What happens to a Wisp after the planning phase?","game_patch":"18.1","expected_document_ids":["riot-tft-set18-wisps"],"no_answer":false},
+    {"id":"set_001","query":"Enchanted Wilds是什么？","game_patch":"18.1","expected_document_ids":["riot-tft-set18-overview"],"no_answer":false},
+    {"id":"none_001","query":"当前版本最强装备合成路线是什么？","game_patch":"18.1","expected_document_ids":[],"no_answer":true},
+    {"id":"none_002","query":"某阵容的精确胜率是多少？","game_patch":"18.1","expected_document_ids":[],"no_answer":true},
+    {"id":"none_003","query":"为什么汽车轮胎需要充气？","game_patch":"18.1","expected_document_ids":[],"no_answer":true},
+    {"id":"wrong_patch_001","query":"17.9版本的系统改动是什么？","game_patch":"17.9","expected_document_ids":[],"no_answer":true}
+  ]
+}
