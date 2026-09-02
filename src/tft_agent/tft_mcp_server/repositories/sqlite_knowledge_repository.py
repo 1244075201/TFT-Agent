@@ -1,6 +1,7 @@
 """Small-corpus SQLite vector retrieval implementation."""
 
 import asyncio
+import json
 import sqlite3
 from array import array
 from collections.abc import Sequence
@@ -34,6 +35,8 @@ class SQLiteKnowledgeRepository:
         set_name: str | None = None,
         document_type: str | None = None,
         source_type: str | None = None,
+        strategy_comp_name: str | None = None,
+        strategy_topic: str | None = None,
     ) -> list[KnowledgeChunk]:
         vector = await asyncio.to_thread(self._embeddings.embed_query, query)
         return await asyncio.to_thread(
@@ -44,6 +47,8 @@ class SQLiteKnowledgeRepository:
             set_name,
             document_type,
             source_type,
+            strategy_comp_name,
+            strategy_topic,
         )
 
     def capability_summary(self) -> str:
@@ -88,8 +93,9 @@ class SQLiteKnowledgeRepository:
             connection.execute(
                 """INSERT INTO knowledge_documents (
                     document_id, title, content, source, source_type, document_type,
-                    game_patch, set_name, language, published_at, retrieved_at, url, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    game_patch, set_name, language, published_at, retrieved_at, url, updated_at,
+                    strategy_comp_names, strategy_entities, strategy_topics
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     data["document_id"],
                     data["title"],
@@ -104,6 +110,9 @@ class SQLiteKnowledgeRepository:
                     data["retrieved_at"],
                     data["url"],
                     data["updated_at"],
+                    json.dumps(data["strategy_comp_names"], ensure_ascii=False),
+                    json.dumps(data["strategy_entities"], ensure_ascii=False),
+                    json.dumps(data["strategy_topics"], ensure_ascii=False),
                 ),
             )
             connection.executemany(
@@ -133,6 +142,8 @@ class SQLiteKnowledgeRepository:
         set_name: str | None,
         document_type: str | None,
         source_type: str | None,
+        strategy_comp_name: str | None,
+        strategy_topic: str | None,
     ) -> list[KnowledgeChunk]:
         clauses = ["c.embedding_model=?", "c.embedding_dimension=?"]
         params: list[object] = [self._embeddings.model_name, len(query)]
@@ -151,6 +162,21 @@ class SQLiteKnowledgeRepository:
         )
         with self._connect() as connection:
             rows = connection.execute(sql, params).fetchall()
+        if strategy_comp_name is not None:
+            wanted_comp = strategy_comp_name.casefold()
+            rows = [
+                row
+                for row in rows
+                if wanted_comp
+                in {item.casefold() for item in json.loads(row["strategy_comp_names"])}
+            ]
+        if strategy_topic is not None:
+            wanted_topic = strategy_topic.casefold()
+            rows = [
+                row
+                for row in rows
+                if wanted_topic in {item.casefold() for item in json.loads(row["strategy_topics"])}
+            ]
         ranked = sorted(
             ((_dot(query, list(array("f", row["embedding"]))), row) for row in rows),
             key=lambda item: item[0],
@@ -179,6 +205,9 @@ def _chunk(row: sqlite3.Row, score: float) -> KnowledgeChunk:
         url=row["url"],
         published_at=_dt(row["published_at"]),
         updated_at=_dt(row["updated_at"]),
+        strategy_comp_names=json.loads(row["strategy_comp_names"]),
+        strategy_entities=json.loads(row["strategy_entities"]),
+        strategy_topics=json.loads(row["strategy_topics"]),
         retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
         embedding_model=row["embedding_model"],
         relevance_score=score,

@@ -41,6 +41,12 @@ class GameStateParser:
             comp_name = comp.group(1).strip()
             if comp_name.casefold() not in {"这套", "这个", "当前", "这套阵容", "这个阵容"}:
                 values["comp_name"] = comp_name
+        elif named_strategy := re.search(
+            r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z0-9]+)+)\s*(?:现在)?"
+            r"(?:怎么玩|怎么运营|如何运营|攻略)",
+            text,
+        ):
+            values["comp_name"] = named_strategy.group(1).strip()
         core = re.search(
             r"(?:核心(?:牌|单位)\s*(?:是|有|：|:)?|核心\s*(?:是|有|：|:))"
             r"\s*([^,，。；;]+)",

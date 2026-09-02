@@ -24,23 +24,53 @@ async def run() -> None:
     )
     async with client:
         tools = [tool.name for tool in await client.list_tools()]
-        result = await client.call_tool(
-            ToolCall(
-                id="rag-smoke",
-                name="search_game_knowledge",
-                arguments={
-                    "query": "Wisp mechanic",
-                    "game_patch": "18.1",
-                    "source_type": "riot_official",
-                    "top_k": 3,
-                },
-                # Explicit authority filter prevents community strategy chunks from
-                # competing with an official mechanics question.
+        cases = {
+            "official_wisp": {
+                "query": "Wisp mechanic",
+                "game_patch": "18.1",
+                "source_type": "riot_official",
+                "top_k": 3,
+            },
+            "blossom": {
+                "query": "Blossom Ahri核心质量不足时D还是升级？",
+                "game_patch": "18.1",
+                "source_type": "community_strategy",
+                "document_type": "strategy_guide",
+                "strategy_comp_name": "Blossom Ahri",
+                "strategy_topic": "core_quality",
+                "top_k": 3,
+            },
+            "solar": {
+                "query": "Solar Kayle现在怎么玩？",
+                "game_patch": "18.1",
+                "source_type": "community_strategy",
+                "document_type": "strategy_guide",
+                "strategy_comp_name": "Solar Kayle",
+                "top_k": 3,
+            },
+            "wisp_positioning": {
+                "query": "Wisp怎么站位？",
+                "game_patch": "18.1",
+                "source_type": "community_strategy",
+                "document_type": "strategy_guide",
+                "strategy_topic": "positioning",
+                "top_k": 3,
+            },
+        }
+        results = {
+            name: await client.call_tool(
+                ToolCall(id=f"rag-smoke-{name}", name="search_game_knowledge", arguments=arguments)
             )
-        )
+            for name, arguments in cases.items()
+        }
     print(
         json.dumps(
-            {"tools": tools, "result": result.model_dump(mode="json")},
+            {
+                "tools": tools,
+                "results": {
+                    name: result.model_dump(mode="json") for name, result in results.items()
+                },
+            },
             ensure_ascii=False,
             indent=2,
             default=str,

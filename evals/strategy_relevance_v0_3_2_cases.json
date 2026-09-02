@@ -1,0 +1,15 @@
+{
+  "dataset_version": "strategy_relevance_v0.3.2_2026-09-02",
+  "cases": [
+    {"id":"entity_blossom","query":"Blossom Ahri核心质量不足时D还是升级？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"Blossom Ahri","strategy_topic":"core_quality","metric_group":"entity_positive","expected_document_ids":["bunnymuffins-18.1-blossom-ahri"],"no_answer":false},
+    {"id":"entity_aphelios","query":"Vanguard Aphelios核心没升级怎么办？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"Vanguard Aphelios","strategy_topic":"core_quality","metric_group":"entity_positive","expected_document_ids":["bunnymuffins-18.1-vanguard-aphelios"],"no_answer":false},
+    {"id":"entity_draven","query":"Draven Fast 9经济断了如何转型？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"Draven Fast 9","strategy_topic":"transition","metric_group":"entity_positive","expected_document_ids":["bunnymuffins-18.1-draven-fast9"],"no_answer":false},
+    {"id":"broad_meta","query":"Set 18开局时如何选择阵容？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_topic":"comp_selection","metric_group":"broad_positive","expected_document_ids":["emblemcomp-set18-launch-meta"],"no_answer":false},
+    {"id":"none_solar","query":"Solar Kayle现在怎么玩？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"Solar Kayle","metric_group":"entity_negative","expected_document_ids":[],"no_answer":true},
+    {"id":"none_entity_mismatch","query":"Moonlight Aphelios怎么运营？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"Moonlight Aphelios","metric_group":"entity_negative","expected_document_ids":[],"no_answer":true},
+    {"id":"none_wisp_position","query":"Wisp怎么站位？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_topic":"positioning","metric_group":"topic_negative","expected_document_ids":[],"no_answer":true},
+    {"id":"none_rewards","query":"18.1排位奖励是什么？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_topic":"ranked_rewards","metric_group":"hard_negative","expected_document_ids":[],"no_answer":true},
+    {"id":"none_author","query":"FictionalCoach推荐什么阵容？","game_patch":"18.1","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"FictionalCoach","metric_group":"hard_negative","expected_document_ids":[],"no_answer":true},
+    {"id":"none_wrong_patch","query":"Blossom Ahri核心质量不足时怎么办？","game_patch":"17.9","document_type":"strategy_guide","source_type":"community_strategy","strategy_comp_name":"Blossom Ahri","strategy_topic":"core_quality","metric_group":"hard_negative","expected_document_ids":[],"no_answer":true}
+  ]
+}

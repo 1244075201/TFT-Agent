@@ -27,6 +27,15 @@ def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
             "agent.filters.patch_notes.document_type": "patch_notes",
             "agent.filters.set_overview.document_type": "set_overview",
             "agent.filters.strategy_guide.document_type": "strategy_guide",
+            "agent.filters.roll_decision.strategy_topic": "roll_decision",
+            "agent.filters.leveling.strategy_topic": "leveling",
+            "agent.filters.economy.strategy_topic": "economy",
+            "agent.filters.core_quality.strategy_topic": "core_quality",
+            "agent.filters.comp_selection.strategy_topic": "comp_selection",
+            "agent.filters.items.strategy_topic": "items",
+            "agent.filters.positioning.strategy_topic": "positioning",
+            "agent.filters.transition.strategy_topic": "transition",
+            "agent.filters.ranked_rewards.strategy_topic": "ranked_rewards",
         }
     )
     for record in state.tool_history:
@@ -35,6 +44,16 @@ def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
             _register_scalars(registry, record.result.data, f"{prefix}.data")
         metadata = record.result.metadata.model_dump(mode="json", exclude_none=True)
         _register_scalars(registry, metadata, f"{prefix}.metadata")
+        if record.tool_call.name == "search_game_knowledge" and isinstance(
+            record.result.data, dict
+        ):
+            chunks = record.result.data.get("results")
+            if isinstance(chunks, list):
+                for chunk in chunks:
+                    if not isinstance(chunk, dict) or not isinstance(chunk.get("chunk_id"), str):
+                        continue
+                    knowledge_prefix = f"knowledge.{record.tool_call.id}.{chunk['chunk_id']}"
+                    _register_scalars(registry, chunk, knowledge_prefix)
     return registry
 
 

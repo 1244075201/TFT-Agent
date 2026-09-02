@@ -19,11 +19,20 @@ class KnowledgeTools:
         set_name = _optional_string(arguments, "set_name")
         document_type = _optional_string(arguments, "document_type")
         source_type = _optional_string(arguments, "source_type")
+        strategy_comp_name = _optional_string(arguments, "strategy_comp_name")
+        strategy_topic = _optional_string(arguments, "strategy_topic")
         limit = arguments.get("top_k", 4)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 8:
             raise ValueError("top_k must be an integer between 1 and 8")
         chunks = await self._repository.search(
-            query, limit, patch, set_name, document_type, source_type
+            query,
+            limit,
+            patch,
+            set_name,
+            document_type,
+            source_type,
+            strategy_comp_name,
+            strategy_topic,
         )
         if not chunks:
             return ToolResult(

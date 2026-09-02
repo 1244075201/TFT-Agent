@@ -474,6 +474,90 @@ async def test_second_unsupported_claim_uses_safe_fallback_without_third_call() 
 
 
 @pytest.mark.asyncio
+async def test_safe_fallback_preserves_grounded_qualitative_strategy_after_bad_number() -> None:
+    agent_state = AgentState(
+        game_state=GameState(hp=35, comp_name="Blossom Ahri", user_question="D还是升8？"),
+        goal="D还是升8？",
+        current_patch="18.1",
+    )
+    now = datetime.now(UTC)
+    agent_state.tool_history.append(
+        ToolCallRecord(
+            tool_call=ToolCall(
+                id="search-1",
+                name="search_game_knowledge",
+                arguments={
+                    "strategy_comp_name": "Blossom Ahri",
+                    "strategy_topic": "core_quality",
+                },
+            ),
+            result=ToolResult(
+                tool_call_id="search-1",
+                success=True,
+                data={
+                    "results": [
+                        {
+                            "chunk_id": "blossom:2",
+                            "source_type": "community_strategy",
+                            "document_type": "strategy_guide",
+                            "game_patch": "18.1",
+                            "strategy_comp_names": ["Blossom Ahri"],
+                            "strategy_topics": ["core_quality", "roll_decision"],
+                            "text": "Improve Ahri and Sett before leveling.",
+                        }
+                    ]
+                },
+            ),
+            started_at=now,
+            finished_at=now,
+            latency_ms=0,
+        )
+    )
+    initial = {
+        "supported_facts": [
+            {
+                "text": "D到20金币。",
+                "numeric_claims": [{"value": 20, "unit": "gold", "meaning": "roll threshold"}],
+            }
+        ],
+        "qualitative_recommendation": {
+            "text": (
+                "先在4-2阶段提升Ahri和Sett的核心质量，而不是升8。 "
+                "第4阶段等两张牌二星后再走。 At Stage 4-2, do not rush level 8."
+            ),
+            "evidence_refs": ["knowledge.search-1.blossom:2"],
+        },
+    }
+    create = AsyncMock(
+        side_effect=[
+            response(content=json.dumps(initial, ensure_ascii=False)),
+            numeric_envelope(
+                "D到25金币。",
+                [{"value": 25, "unit": "gold", "meaning": "replacement threshold"}],
+            ),
+        ]
+    )
+
+    decision = await client_with_create(create).generate(agent_state, [tool_definition()])
+
+    assert decision.final_response is not None
+    assert "20" not in decision.final_response.recommendation
+    assert "25" not in decision.final_response.recommendation
+    assert "4-2" not in decision.final_response.recommendation
+    assert "升8" not in decision.final_response.recommendation
+    assert "Stage 4-2" not in decision.final_response.recommendation
+    assert "level 8" not in decision.final_response.recommendation
+    assert "第4" not in decision.final_response.recommendation
+    assert "二星" not in decision.final_response.recommendation
+    assert "两张" not in decision.final_response.recommendation
+    assert "提升Ahri和Sett的核心质量" in decision.final_response.recommendation
+    assert decision.final_response.strategy_recommendation is not None
+    trace = agent_state.trace.qualitative_recommendation_validation
+    assert trace is not None
+    assert trace.preserved_after_repair is True
+
+
+@pytest.mark.asyncio
 async def test_provider_timeout_is_mapped_and_bounded() -> None:
     create = AsyncMock(
         side_effect=APITimeoutError(request=httpx.Request("POST", "https://api.deepseek.com"))

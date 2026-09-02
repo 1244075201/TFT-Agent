@@ -74,7 +74,9 @@ def create_server(
                 "strategy guides. Community strategy is opinion, never Riot authority. Use "
                 "strategy only for a named covered comp/topic, not global-best claims or "
                 "unsupported authors. Never replace structured champion data or shop odds. "
-                "Copy the user's complete question into query; use grounded filters only. "
+                "Copy the user's complete question into query; use grounded filters only. For an "
+                "explicitly named comp, strategy_comp_name is required. Use strategy_topic only "
+                "for an explicit supported topic; omit both for broad strategy questions. "
                 f"{capability_summary}"
             )
         )
@@ -85,6 +87,8 @@ def create_server(
             set_name: str | None = None,
             document_type: str | None = None,
             source_type: str | None = None,
+            strategy_comp_name: str | None = None,
+            strategy_topic: str | None = None,
         ) -> ToolResult:
             """Search the local versioned official and community knowledge corpus."""
 
@@ -97,6 +101,8 @@ def create_server(
                     "set_name": set_name,
                     "document_type": document_type,
                     "source_type": source_type,
+                    "strategy_comp_name": strategy_comp_name,
+                    "strategy_topic": strategy_topic,
                 },
             )
 

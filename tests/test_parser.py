@@ -47,3 +47,18 @@ def test_parser_does_not_treat_a_generic_comp_reference_as_a_name() -> None:
     assert state.comp_name is None
     assert state.core_units == []
     assert GameStateValidator().missing_strategy_context(state) == ["comp_name or core_units"]
+
+
+def test_parser_extracts_explicit_named_strategy_entity() -> None:
+    state = GameStateParser().parse_text("Solar Kayle现在怎么玩？")
+
+    assert state.comp_name == "Solar Kayle"
+
+
+def test_parser_extracts_named_comp_before_guide_reference() -> None:
+    state = GameStateParser().parse_text(
+        "查DA_18_Ahri费用，再结合18.1 Blossom Ahri攻略说明这套阵容。"
+    )
+
+    assert state.comp_name == "Blossom Ahri"
+    assert GameStateValidator().missing_strategy_context(state) == []

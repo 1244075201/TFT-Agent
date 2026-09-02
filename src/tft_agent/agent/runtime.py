@@ -93,8 +93,26 @@ class AgentRuntime:
         trace = state.trace.tool_argument_validation
         trace.proposed_tool_calls += 1
         registry = build_evidence_registry(state)
-        claims = tool_call.argument_claims or construct_argument_claims(
-            tool_call.arguments, registry
+        if (
+            tool_call.name == "search_game_knowledge"
+            and state.game_state.comp_name is not None
+            and tool_call.arguments.get("source_type") == "community_strategy"
+            and tool_call.arguments.get("document_type") == "strategy_guide"
+        ):
+            tool_call = tool_call.model_copy(
+                update={
+                    "arguments": {
+                        **tool_call.arguments,
+                        "strategy_comp_name": state.game_state.comp_name,
+                    }
+                }
+            )
+        claims = list(tool_call.argument_claims)
+        claimed_names = {claim.argument_name for claim in claims}
+        claims.extend(
+            claim
+            for claim in construct_argument_claims(tool_call.arguments, registry)
+            if claim.argument_name not in claimed_names
         )
         grounded = tool_call.model_copy(update={"argument_claims": claims})
         results = ToolArgumentValidator().validate(grounded, registry)

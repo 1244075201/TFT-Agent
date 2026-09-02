@@ -24,6 +24,9 @@ class RetrievalCase(StrictModel):
     set_name: str | None = None
     document_type: str | None = None
     source_type: str | None = None
+    strategy_comp_name: str | None = None
+    strategy_topic: str | None = None
+    metric_group: str | None = None
     expected_document_ids: list[str]
     expected_source_types: list[str] = Field(default_factory=list)
     no_answer: bool = False
@@ -52,6 +55,8 @@ async def run(args: argparse.Namespace) -> None:
             set_name=case.set_name,
             document_type=case.document_type,
             source_type=args.source_type_override or case.source_type,
+            strategy_comp_name=case.strategy_comp_name,
+            strategy_topic=case.strategy_topic,
         )
         ids = [chunk.document_id for chunk in chunks]
         rank = next(
@@ -90,6 +95,11 @@ async def run(args: argparse.Namespace) -> None:
             case.no_answer and bool(result["documents"])
             for case, result in zip(dataset.cases, results, strict=True)
         ),
+        "entity_match_recall": _group_rate(results, dataset.cases, "entity_positive", True),
+        "entity_false_positive": _group_rate(results, dataset.cases, "entity_negative", True),
+        "topic_false_positive": _group_rate(results, dataset.cases, "topic_negative", True),
+        "hard_negative_precision": _group_rate(results, dataset.cases, "hard_negative", False),
+        "knowledge_not_found_correctness": _no_answer_rate(results, dataset.cases),
         "results": results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -107,6 +117,29 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("eval_results/retrieval_v03.json"))
     parser.add_argument("--source-type-override")
     asyncio.run(run(parser.parse_args()))
+
+
+def _group_rate(
+    results: list[dict[str, Any]],
+    cases: list[RetrievalCase],
+    group: str,
+    expect_result: bool,
+) -> float | None:
+    selected = [
+        bool(result["documents"]) == expect_result
+        for result, case in zip(results, cases, strict=True)
+        if case.metric_group == group
+    ]
+    return sum(selected) / len(selected) if selected else None
+
+
+def _no_answer_rate(results: list[dict[str, Any]], cases: list[RetrievalCase]) -> float | None:
+    selected = [
+        not bool(result["documents"])
+        for result, case in zip(results, cases, strict=True)
+        if case.no_answer
+    ]
+    return sum(selected) / len(selected) if selected else None
 
 
 if __name__ == "__main__":

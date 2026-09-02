@@ -24,6 +24,7 @@ from tft_agent.agent.trace import (
     LLMCallTrace,
     NumericClaimTrace,
     NumericClaimValidationTrace,
+    QualitativeRecommendationTrace,
     TokenUsage,
 )
 from tft_agent.core.config import Settings
@@ -34,6 +35,8 @@ from tft_agent.core.schemas import (
     FinalResponse,
     NumericClaim,
     NumericClaimStatus,
+    QualitativeClaimStatus,
+    StrategyRecommendation,
 )
 from tft_agent.llm.deepseek_messages import (
     build_provider_messages,
@@ -42,6 +45,7 @@ from tft_agent.llm.deepseek_messages import (
 )
 from tft_agent.llm.evidence import build_evidence_registry
 from tft_agent.llm.numeric_claims import NumericClaimValidator, NumericValidationReport
+from tft_agent.llm.qualitative_claims import QualitativeRecommendationValidator
 from tft_agent.mcp_client.client import MCPToolDefinition
 
 
@@ -140,13 +144,38 @@ class DeepSeekLLMClient:
         registry = build_evidence_registry(state)
         report, validation_ms = _validate_decision(decision, registry)
         assert decision.final_response is not None
+        qualitative = QualitativeRecommendationValidator().validate(
+            decision.final_response.strategy_recommendation, state
+        )
+        recommendation_required = _strategy_recommendation_required(state)
+        qualitative_complete = (
+            not recommendation_required
+            or decision.final_response.strategy_recommendation is not None
+        )
+        state.trace.qualitative_recommendation_validation = QualitativeRecommendationTrace(
+            status=(
+                qualitative.status
+                if qualitative_complete
+                else QualitativeClaimStatus.INVALID_REFERENCE
+            ),
+            evidence_refs=(
+                decision.final_response.strategy_recommendation.evidence_refs
+                if decision.final_response.strategy_recommendation
+                else []
+            ),
+        )
         trace = _validation_trace(
             report,
             validation_ms,
             decision.final_response.recommendation,
         )
         state.trace.numeric_claim_validation = trace
-        if report.valid and _declaration_complete(decision):
+        if (
+            report.valid
+            and _declaration_complete(decision)
+            and qualitative.valid
+            and qualitative_complete
+        ):
             return decision
 
         trace.correction_attempted = True
@@ -155,7 +184,7 @@ class DeepSeekLLMClient:
             "messages": [
                 *initial_request["messages"],
                 {"role": "assistant", "content": _decision_envelope(decision)},
-                {"role": "user", "content": _correction_feedback(report, decision)},
+                {"role": "user", "content": _correction_feedback(report, decision, state)},
             ],
             "extra_body": {"thinking": {"type": self._thinking_mode}},
         }
@@ -166,7 +195,16 @@ class DeepSeekLLMClient:
         except LLMProviderError:
             trace.correction_latency_ms = (perf_counter() - started) * 1000
             trace.fallback_used = True
-            return _safe_fallback(report)
+            fallback = _safe_fallback(
+                report, decision.final_response.strategy_recommendation, qualitative.valid
+            )
+            qualitative_trace = state.trace.qualitative_recommendation_validation
+            assert qualitative_trace is not None
+            qualitative_trace.preserved_after_repair = (
+                fallback.final_response is not None
+                and fallback.final_response.strategy_recommendation is not None
+            )
+            return fallback
         correction_ms = (perf_counter() - started) * 1000
         trace.correction_latency_ms = correction_ms
         state.trace.llm_calls.append(
@@ -180,15 +218,42 @@ class DeepSeekLLMClient:
         )
         if correction.action == AgentAction.FINAL:
             corrected_report, corrected_validation_ms = _validate_decision(correction, registry)
+            assert correction.final_response is not None
+            corrected_qualitative = QualitativeRecommendationValidator().validate(
+                correction.final_response.strategy_recommendation, state
+            )
             trace.validation_latency_ms += corrected_validation_ms
-            if corrected_report.valid and _declaration_complete(correction):
+            if (
+                corrected_report.valid
+                and _declaration_complete(correction)
+                and corrected_qualitative.valid
+                and (
+                    not recommendation_required
+                    or correction.final_response.strategy_recommendation is not None
+                )
+            ):
                 trace.correction_succeeded = True
+                qualitative_trace = state.trace.qualitative_recommendation_validation
+                assert qualitative_trace is not None
+                qualitative_trace.status = QualitativeClaimStatus.SUPPORTED
+                qualitative_trace.preserved_after_repair = (
+                    correction.final_response.strategy_recommendation is not None
+                )
                 return correction
         if correction.action == AgentAction.REQUEST_CONTEXT and not state.tool_history:
             trace.correction_succeeded = True
             return correction
         trace.fallback_used = True
-        return _safe_fallback(report)
+        fallback = _safe_fallback(
+            report, decision.final_response.strategy_recommendation, qualitative.valid
+        )
+        qualitative_trace = state.trace.qualitative_recommendation_validation
+        assert qualitative_trace is not None
+        qualitative_trace.preserved_after_repair = (
+            fallback.final_response is not None
+            and fallback.final_response.strategy_recommendation is not None
+        )
+        return fallback
 
     async def close(self) -> None:
         """Close provider transports owned by this adapter."""
@@ -287,12 +352,19 @@ def _decision_envelope(decision: AgentDecision) -> str:
         {
             "answer": decision.final_response.recommendation,
             "numeric_claims": [claim.model_dump(mode="json") for claim in decision.numeric_claims],
+            "strategy_recommendation": (
+                decision.final_response.strategy_recommendation.model_dump(mode="json")
+                if decision.final_response.strategy_recommendation
+                else None
+            ),
         },
         ensure_ascii=False,
     )
 
 
-def _correction_feedback(report: NumericValidationReport, decision: AgentDecision) -> str:
+def _correction_feedback(
+    report: NumericValidationReport, decision: AgentDecision, state: AgentState
+) -> str:
     failures = [
         {
             "value": result.claim.value,
@@ -304,30 +376,75 @@ def _correction_feedback(report: NumericValidationReport, decision: AgentDecisio
     ]
     if not decision.numeric_claims_declared:
         failures.append({"status": "missing_numeric_claim_envelope"})
+    refs = _available_strategy_refs(state)
     return (
         "Repair only the final output. Unsupported or invalid numeric claims are: "
         f"{json.dumps(failures, ensure_ascii=False)}. Rewrite the answer while preserving "
         "supported "
         "facts and qualitative advice. Remove unsupported precision; do not introduce replacement "
-        "numbers. Return only the segmented supported_facts + qualitative_recommendation envelope. "
+        "numbers. Preserve the original strategy recommendation only with its verified "
+        "strategy_recommendation evidence_refs. Return only the segmented supported_facts + "
+        "qualitative_recommendation object envelope. "
+        f"Verified current-task strategy refs are: {json.dumps(refs)}. "
         "If a responsible answer requires missing user facts, return the request_context envelope "
         "instead. Do not call tools."
     )
 
 
-def _safe_fallback(report: NumericValidationReport) -> AgentDecision:
+def _available_strategy_refs(state: AgentState) -> list[str]:
+    refs: list[str] = []
+    for record in state.tool_history:
+        if record.tool_call.name != "search_game_knowledge" or not isinstance(
+            record.result.data, dict
+        ):
+            continue
+        chunks = record.result.data.get("results")
+        if not isinstance(chunks, list):
+            continue
+        refs.extend(
+            f"knowledge.{record.tool_call.id}.{chunk['chunk_id']}"
+            for chunk in chunks
+            if isinstance(chunk, dict)
+            and isinstance(chunk.get("chunk_id"), str)
+            and chunk.get("source_type") == "community_strategy"
+            and chunk.get("document_type") == "strategy_guide"
+            and chunk.get("game_patch") in {None, state.current_patch}
+        )
+    return refs
+
+
+def _strategy_recommendation_required(state: AgentState) -> bool:
+    return bool(_available_strategy_refs(state))
+
+
+def _safe_fallback(
+    report: NumericValidationReport,
+    recommendation: StrategyRecommendation | None,
+    recommendation_valid: bool,
+) -> AgentDecision:
     supported = [
         result.claim for result in report.results if result.status == NumericClaimStatus.SUPPORTED
     ]
     facts = "; ".join(_render_claim(claim) for claim in supported)
     prefix = f"Verified facts: {facts}. " if facts else ""
+    preserved = (
+        recommendation.model_copy(update={"text": _remove_numeric_precision(recommendation.text)})
+        if recommendation is not None and recommendation_valid
+        else None
+    )
+    qualitative = (
+        preserved.text
+        if preserved is not None
+        else (
+            "I can provide a qualitative recommendation, but the available evidence does not "
+            "support the other precise quantities in the draft."
+        )
+    )
     return AgentDecision(
         action=AgentAction.FINAL,
         final_response=FinalResponse(
-            recommendation=(
-                f"{prefix}I can provide a qualitative recommendation, but the available evidence "
-                "does not support the other precise quantities in the draft."
-            )
+            recommendation=(f"{prefix}{qualitative}"),
+            strategy_recommendation=preserved,
         ),
         numeric_claims=supported,
         numeric_claims_declared=True,
@@ -345,6 +462,20 @@ def _render_claim(claim: NumericClaim) -> str:
         if claim.unit:
             value = f"{value} {claim.unit}"
     return f"{claim.meaning} = {value}"
+
+
+def _remove_numeric_precision(text: str) -> str:
+    """Drop numeric precision from an already provenance-valid qualitative conclusion."""
+
+    text = re.sub(r"\bStage\s+\d+-\d+\b", "the current stage", text, flags=re.IGNORECASE)
+    text = re.sub(r"\blevel\s+\d+\b", "a higher level", text, flags=re.IGNORECASE)
+    text = re.sub(r"\d+-\d+", "当前阶段", text)
+    text = re.sub(r"(?<!\w)\d+-\d+\s*阶段", "当前阶段", text)
+    text = re.sub(r"升\s*\d+", "立即升级", text)
+    text = re.sub(r"\d+(?:\.\d+)*(?:%)?", "", text)
+    text = re.sub(r"(?:一|二|三|四|五)星", "完成升级", text)
+    text = re.sub(r"[〇零一二三四五六七八九十两]+", "", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def _map_provider_error(exc: Exception) -> LLMProviderError:

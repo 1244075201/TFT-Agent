@@ -72,6 +72,11 @@ MIGRATIONS = [
     CREATE INDEX idx_knowledge_documents_document_type
         ON knowledge_documents(document_type);
     """,
+    """
+    ALTER TABLE knowledge_documents ADD COLUMN strategy_comp_names TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE knowledge_documents ADD COLUMN strategy_entities TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE knowledge_documents ADD COLUMN strategy_topics TEXT NOT NULL DEFAULT '[]';
+    """,
 ]
 
 

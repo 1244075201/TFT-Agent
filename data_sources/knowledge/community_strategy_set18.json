@@ -11,6 +11,9 @@
     "language": "en",
     "published_at": null,
     "updated_at": null,
+    "strategy_comp_names": ["Blossom Ahri"],
+    "strategy_entities": ["Ahri", "Sett", "Ashe", "Gnar"],
+    "strategy_topics": ["roll_decision", "leveling", "core_quality", "items", "transition"],
     "retrieved_at": "2026-09-01T17:30:00Z",
     "url": "https://bunnymuffins.lol/meta/"
   },
@@ -26,6 +29,9 @@
     "language": "en",
     "published_at": null,
     "updated_at": null,
+    "strategy_comp_names": ["Vanguard Aphelios"],
+    "strategy_entities": ["Aphelios", "Sentinel", "Brambleback", "Alune", "Lux"],
+    "strategy_topics": ["roll_decision", "leveling", "core_quality", "items", "transition"],
     "retrieved_at": "2026-09-01T17:30:00Z",
     "url": "https://bunnymuffins.lol/meta/"
   },
@@ -41,6 +47,9 @@
     "language": "en",
     "published_at": null,
     "updated_at": null,
+    "strategy_comp_names": ["Draven Fast 9"],
+    "strategy_entities": ["Draven", "Maokai", "Aphelios"],
+    "strategy_topics": ["economy", "leveling", "core_quality", "transition"],
     "retrieved_at": "2026-09-01T17:30:00Z",
     "url": "https://bunnymuffins.lol/meta/"
   },
@@ -56,6 +65,9 @@
     "language": "en",
     "published_at": "2026-02-13T00:00:00Z",
     "updated_at": "2026-08-26T00:00:00Z",
+    "strategy_comp_names": [],
+    "strategy_entities": [],
+    "strategy_topics": ["comp_selection", "economy", "transition"],
     "retrieved_at": "2026-09-01T17:30:00Z",
     "url": "https://emblemcomp.gg/guides/set-18-meta-compositions"
   }

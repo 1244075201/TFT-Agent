@@ -124,6 +124,13 @@ class ToolCallRecord(StrictModel):
     latency_ms: float = Field(ge=0)
 
 
+class StrategyRecommendation(StrictModel):
+    """A qualitative strategy conclusion with current-task knowledge references."""
+
+    text: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
 class FinalResponse(StrictModel):
     """User-facing recommendation produced by the agent."""
 
@@ -134,6 +141,7 @@ class FinalResponse(StrictModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     used_tools: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    strategy_recommendation: StrategyRecommendation | None = None
 
 
 class AgentStatus(StrEnum):
@@ -157,6 +165,16 @@ class NumericClaimStatus(StrEnum):
     UNSUPPORTED = "unsupported"
     MISMATCHED = "mismatched"
     INVALID_REFERENCE = "invalid_reference"
+
+
+class QualitativeClaimStatus(StrEnum):
+    """Small deterministic status set for strategy recommendation provenance."""
+
+    SUPPORTED = "supported"
+    INVALID_REFERENCE = "invalid_reference"
+    WRONG_SOURCE_TYPE = "wrong_source_type"
+    WRONG_VERSION = "wrong_version"
+    IRRELEVANT_EVIDENCE = "irrelevant_evidence"
 
 
 class NumericDerivation(StrictModel):

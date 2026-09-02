@@ -14,6 +14,7 @@ from tft_agent.core.schemas import (
     AgentDecision,
     FinalResponse,
     NumericClaim,
+    StrategyRecommendation,
     ToolCall,
     ToolCallRecord,
 )
@@ -163,9 +164,34 @@ def normalize_provider_response(
         )
     if "supported_facts" in payload:
         raw_facts = payload.get("supported_facts")
-        recommendation = payload.get("qualitative_recommendation")
-        if not isinstance(raw_facts, list) or not isinstance(recommendation, str):
+        raw_recommendation = payload.get("qualitative_recommendation")
+        if not isinstance(raw_facts, list) or not isinstance(raw_recommendation, (str, dict)):
             raise _malformed("segmented final envelope has invalid fields")
+        strategy_recommendation: StrategyRecommendation | None = None
+        if isinstance(raw_recommendation, dict):
+            normalized_recommendation = dict(raw_recommendation)
+            raw_refs = normalized_recommendation.get("evidence_refs")
+            if isinstance(raw_refs, str):
+                normalized_recommendation["evidence_refs"] = [raw_refs]
+            try:
+                strategy_recommendation = StrategyRecommendation.model_validate(
+                    normalized_recommendation
+                )
+            except PydanticValidationError as exc:
+                if not _strategy_refs(state) and isinstance(raw_recommendation.get("text"), str):
+                    recommendation = raw_recommendation["text"]
+                else:
+                    raise _malformed("segmented recommendation has invalid evidence refs") from exc
+            else:
+                recommendation = strategy_recommendation.text
+        else:
+            recommendation = raw_recommendation
+            refs = _strategy_refs(state)
+            if refs:
+                strategy_recommendation = StrategyRecommendation(
+                    text=recommendation,
+                    evidence_refs=refs,
+                )
         fact_texts: list[str] = []
         segment_claims: list[NumericClaim] = []
         try:
@@ -173,6 +199,8 @@ def normalize_provider_response(
                 if not isinstance(fact, dict) or not isinstance(fact.get("text"), str):
                     raise ValueError("invalid fact segment")
                 raw_segment_claims = fact.get("numeric_claims")
+                if raw_segment_claims is None:
+                    raw_segment_claims = []
                 if not isinstance(raw_segment_claims, list):
                     raise ValueError("invalid fact claims")
                 fact_texts.append(fact["text"].strip())
@@ -186,19 +214,22 @@ def normalize_provider_response(
             raise _malformed("segmented final envelope is empty")
         return AgentDecision(
             action=AgentAction.FINAL,
-            final_response=FinalResponse(recommendation=answer),
+            final_response=FinalResponse(
+                recommendation=answer,
+                strategy_recommendation=strategy_recommendation,
+            ),
             numeric_claims=segment_claims,
             numeric_claims_declared=True,
         )
     if payload.get("action") != AgentAction.FINAL.value:
         return _plain_final(content)
-    recommendation = payload.get("recommendation")
-    if not isinstance(recommendation, str) or not recommendation.strip():
+    final_recommendation = payload.get("recommendation")
+    if not isinstance(final_recommendation, str) or not final_recommendation.strip():
         raise _malformed("final action requires a recommendation")
     return AgentDecision(
         action=AgentAction.FINAL,
         final_response=FinalResponse(
-            recommendation=recommendation,
+            recommendation=final_recommendation,
             reasoning=_string_list(payload.get("reasoning")),
             next_steps=_string_list(payload.get("next_steps")),
             alternatives=_string_list(payload.get("alternatives")),
@@ -224,6 +255,28 @@ def _embedded_envelope(content: str) -> dict[str, Any] | None:
         ):
             return payload
     return None
+
+
+def _strategy_refs(state: AgentState) -> list[str]:
+    refs: list[str] = []
+    for record in state.tool_history:
+        if record.tool_call.name != "search_game_knowledge" or not isinstance(
+            record.result.data, dict
+        ):
+            continue
+        chunks = record.result.data.get("results")
+        if not isinstance(chunks, list):
+            continue
+        refs.extend(
+            f"knowledge.{record.tool_call.id}.{chunk['chunk_id']}"
+            for chunk in chunks
+            if isinstance(chunk, dict)
+            and isinstance(chunk.get("chunk_id"), str)
+            and chunk.get("source_type") == "community_strategy"
+            and chunk.get("document_type") == "strategy_guide"
+            and chunk.get("game_patch") in {None, state.current_patch}
+        )
+    return refs
 
 
 def _plain_final(content: str) -> AgentDecision:

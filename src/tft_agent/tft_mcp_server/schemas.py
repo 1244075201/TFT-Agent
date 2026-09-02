@@ -97,6 +97,9 @@ class KnowledgeChunk(StrictModel):
     url: str
     published_at: datetime | None = None
     updated_at: datetime | None = None
+    strategy_comp_names: list[str] = Field(default_factory=list)
+    strategy_entities: list[str] = Field(default_factory=list)
+    strategy_topics: list[str] = Field(default_factory=list)
     retrieved_at: datetime
     embedding_model: str | None = None
     relevance_score: float | None = Field(default=None, ge=-1, le=1)
@@ -116,6 +119,9 @@ class KnowledgeDocument(StrictModel):
     language: str
     published_at: datetime | None = None
     updated_at: datetime | None = None
+    strategy_comp_names: list[str] = Field(default_factory=list)
+    strategy_entities: list[str] = Field(default_factory=list)
+    strategy_topics: list[str] = Field(default_factory=list)
     retrieved_at: datetime
     url: str
 

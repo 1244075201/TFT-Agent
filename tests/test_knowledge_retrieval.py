@@ -58,6 +58,10 @@ def record(doc: KnowledgeDocument, vector: list[float]) -> KnowledgeChunkRecord:
         language=doc.language,
         url=doc.url,
         published_at=doc.published_at,
+        updated_at=doc.updated_at,
+        strategy_comp_names=doc.strategy_comp_names,
+        strategy_entities=doc.strategy_entities,
+        strategy_topics=doc.strategy_topics,
         retrieved_at=doc.retrieved_at,
         embedding=vector,
         embedding_model="fake-v1",
@@ -207,3 +211,53 @@ def test_capability_summary_is_derived_from_stored_documents(tmp_path: Path) -> 
     summary = repo.capability_summary()
     assert "community_strategy: strategy_guide" in summary
     assert "Blossom Ahri strategy" in summary
+
+
+@pytest.mark.asyncio
+async def test_strategy_entity_and_topic_filters_precede_similarity(tmp_path: Path) -> None:
+    repo = SQLiteKnowledgeRepository(tmp_path / "test.sqlite3", FakeEmbeddings(), 0.7)
+    repo.initialize_sync()
+    strategy = document("strategy", "18.1").model_copy(
+        update={
+            "source_type": "community_strategy",
+            "document_type": "strategy_guide",
+            "strategy_comp_names": ["Blossom Ahri"],
+            "strategy_entities": ["Ahri", "Sett"],
+            "strategy_topics": ["roll_decision", "core_quality"],
+        }
+    )
+    await repo.replace_document(strategy, [record(strategy, [1.0, 0.0])])
+
+    assert (
+        await repo.search(
+            "Solar Kayle怎么玩",
+            4,
+            game_patch="18.1",
+            source_type="community_strategy",
+            document_type="strategy_guide",
+            strategy_comp_name="Solar Kayle",
+        )
+        == []
+    )
+    assert (
+        await repo.search(
+            "Blossom Ahri怎么站位",
+            4,
+            game_patch="18.1",
+            source_type="community_strategy",
+            document_type="strategy_guide",
+            strategy_comp_name="Blossom Ahri",
+            strategy_topic="positioning",
+        )
+        == []
+    )
+    matched = await repo.search(
+        "精灵 Blossom Ahri核心质量",
+        4,
+        game_patch="18.1",
+        source_type="community_strategy",
+        document_type="strategy_guide",
+        strategy_comp_name="blossom ahri",
+        strategy_topic="core_quality",
+    )
+    assert [item.document_id for item in matched] == ["strategy"]

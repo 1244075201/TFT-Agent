@@ -6,7 +6,13 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from tft_agent.core.schemas import AgentStatus, NumericClaimStatus, StrictModel, utc_now
+from tft_agent.core.schemas import (
+    AgentStatus,
+    NumericClaimStatus,
+    QualitativeClaimStatus,
+    StrictModel,
+    utc_now,
+)
 
 
 class TokenUsage(StrictModel):
@@ -53,6 +59,12 @@ class NumericClaimValidationTrace(StrictModel):
     claims: list[NumericClaimTrace] = Field(default_factory=list)
 
 
+class QualitativeRecommendationTrace(StrictModel):
+    status: QualitativeClaimStatus
+    evidence_refs: list[str] = Field(default_factory=list)
+    preserved_after_repair: bool = False
+
+
 class ToolArgumentValidationTrace(StrictModel):
     """Aggregate pre-execution argument provenance enforcement."""
 
@@ -81,6 +93,7 @@ class AgentTrace(StrictModel):
     game_state_snapshot: dict[str, Any] = Field(default_factory=dict)
     grounded_evidence_fields: list[str] = Field(default_factory=list)
     numeric_claim_validation: NumericClaimValidationTrace | None = None
+    qualitative_recommendation_validation: QualitativeRecommendationTrace | None = None
     tool_argument_validation: ToolArgumentValidationTrace = Field(
         default_factory=ToolArgumentValidationTrace
     )
