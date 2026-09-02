@@ -28,7 +28,14 @@ async def run() -> None:
             ToolCall(
                 id="rag-smoke",
                 name="search_game_knowledge",
-                arguments={"query": "Wisp mechanic", "game_patch": "18.1", "top_k": 3},
+                arguments={
+                    "query": "Wisp mechanic",
+                    "game_patch": "18.1",
+                    "source_type": "riot_official",
+                    "top_k": 3,
+                },
+                # Explicit authority filter prevents community strategy chunks from
+                # competing with an official mechanics question.
             )
         )
     print(

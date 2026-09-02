@@ -1,0 +1,17 @@
+{
+  "dataset_version": "retrieval_strategy_v0.3.1_2026-09-02",
+  "cases": [
+    {"id":"blossom_001","query":"Blossom Ahri Stage 4应该搜什么核心升级？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["bunnymuffins-18.1-blossom-ahri"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"blossom_002","query":"Blossom Ahri稳定后何时升级找Ashe和Gnar？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["bunnymuffins-18.1-blossom-ahri"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"aphelios_001","query":"Vanguard Aphelios Stage 4 loss streak roll timing","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["bunnymuffins-18.1-vanguard-aphelios"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"aphelios_002","query":"Aphelios Brambleback没二星前要不要升9？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["bunnymuffins-18.1-vanguard-aphelios"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"draven_001","query":"Draven Fast 9经济不够时向什么阵容转型？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["bunnymuffins-18.1-draven-fast9"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"draven_002","query":"Draven Fast 9什么时候roll最终board？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["bunnymuffins-18.1-draven-fast9"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"meta_001","query":"Set 18 launch meta为什么不能断言唯一最强阵容？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["emblemcomp-set18-launch-meta"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"meta_002","query":"开局强化装备和同行情况如何影响选阵容？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":["emblemcomp-set18-launch-meta"],"expected_source_types":["community_strategy"],"no_answer":false},
+    {"id":"none_rank_rewards","query":"18.1排位赛结算奖励是什么？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":[],"expected_source_types":[],"no_answer":true},
+    {"id":"none_wisp_position","query":"Wisp怎么站位？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":[],"expected_source_types":[],"no_answer":true},
+    {"id":"none_author","query":"FictionalCoach推荐什么阵容？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":[],"expected_source_types":[],"no_answer":true},
+    {"id":"none_uncovered_comp","query":"Solar Kayle在18.1应该怎么运营？","game_patch":"18.1","set_name":"Enchanted Wilds","document_type":"strategy_guide","source_type":"community_strategy","expected_document_ids":[],"expected_source_types":[],"no_answer":true}
+  ]
+}

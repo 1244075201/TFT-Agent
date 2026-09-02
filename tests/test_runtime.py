@@ -125,6 +125,43 @@ async def test_runtime_routes_tool_then_final() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_attributes_strategy_sources_only_from_tool_results() -> None:
+    result_payload = ToolResult(
+        tool_call_id="placeholder",
+        success=True,
+        data={
+            "results": [
+                {
+                    "title": "Blossom Ahri guide",
+                    "url": "https://example.test/guide",
+                    "source_type": "community_strategy",
+                }
+            ]
+        },
+    )
+    llm = FakeLLMClient(
+        [
+            AgentDecision(
+                action=AgentAction.TOOL_CALL,
+                tool_call=ToolCall(id="rag", name="lookup", arguments={}),
+            ),
+            AgentDecision(
+                action=AgentAction.FINAL,
+                final_response=FinalResponse(
+                    recommendation="Use the retrieved community view cautiously.",
+                    sources=["https://invented.invalid"],
+                ),
+            ),
+        ]
+    )
+
+    result = await AgentRuntime(llm, ResultMCPClient(result_payload)).run(make_state())
+
+    assert result.final_response is not None
+    assert result.final_response.sources == ["Blossom Ahri guide — https://example.test/guide"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_routes_request_context() -> None:
     llm = FakeLLMClient(
         [AgentDecision(action=AgentAction.REQUEST_CONTEXT, missing_context=["current shop"])]

@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import Field
+
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import StrictModel
 from tft_agent.embeddings.local_e5 import LocalE5EmbeddingClient
@@ -19,7 +21,11 @@ class RetrievalCase(StrictModel):
     id: str
     query: str
     game_patch: str | None = None
+    set_name: str | None = None
+    document_type: str | None = None
+    source_type: str | None = None
     expected_document_ids: list[str]
+    expected_source_types: list[str] = Field(default_factory=list)
     no_answer: bool = False
 
 
@@ -39,7 +45,14 @@ async def run(args: argparse.Namespace) -> None:
     reciprocal: list[float] = []
     no_answer_correct = 0
     for case in dataset.cases:
-        chunks = await repository.search(case.query, 5, game_patch=case.game_patch)
+        chunks = await repository.search(
+            case.query,
+            5,
+            game_patch=case.game_patch,
+            set_name=case.set_name,
+            document_type=case.document_type,
+            source_type=args.source_type_override or case.source_type,
+        )
         ids = [chunk.document_id for chunk in chunks]
         rank = next(
             (index + 1 for index, value in enumerate(ids) if value in case.expected_document_ids),
@@ -54,6 +67,7 @@ async def run(args: argparse.Namespace) -> None:
                 "id": case.id,
                 "documents": ids,
                 "scores": [chunk.relevance_score for chunk in chunks],
+                "source_types": [chunk.source_type for chunk in chunks],
                 "rank": rank,
                 "no_answer_correct": case.no_answer and not chunks,
             }
@@ -91,4 +105,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=Path("evals/retrieval_v0_3_cases.json"))
     parser.add_argument("--output", type=Path, default=Path("eval_results/retrieval_v03.json"))
+    parser.add_argument("--source-type-override")
     asyncio.run(run(parser.parse_args()))
+
+
+if __name__ == "__main__":
+    main()

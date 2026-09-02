@@ -32,3 +32,31 @@ def test_evidence_context_separates_user_and_tool_facts() -> None:
     assert context["tool_evidence"][0]["arguments"] == {"level": 7}
     assert "user_facts.hp" in paths
     assert "tool_evidence[0].get_shop_odds.data.odds.cost_4" in paths
+
+
+def test_evidence_context_separates_community_strategy_from_official_knowledge() -> None:
+    now = datetime.now(UTC)
+    chunks = [
+        {"title": "Official", "source_type": "riot_official"},
+        {"title": "Guide", "source_type": "community_strategy"},
+    ]
+    state = AgentState(
+        game_state=GameState(comp_name="Blossom Ahri", core_units=["Ahri", "Sett"]),
+        goal="decide",
+        tool_history=[
+            ToolCallRecord(
+                tool_call=ToolCall(id="rag", name="search_game_knowledge", arguments={}),
+                result=ToolResult(tool_call_id="rag", success=True, data={"results": chunks}),
+                started_at=now,
+                finished_at=now,
+                latency_ms=0,
+            )
+        ],
+    )
+
+    context = build_evidence_context(state)
+
+    assert context["user_facts"]["comp_name"] == "Blossom Ahri"
+    assert context["official_knowledge"] == [chunks[0]]
+    assert context["community_strategy_evidence"] == [chunks[1]]
+    assert context["structured_evidence"] == []

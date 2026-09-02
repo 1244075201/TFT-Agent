@@ -1,0 +1,28 @@
+{
+  "dataset_version": "strategy_decision_v0.3.1_2026-09-02",
+  "manual_quality_rubric": [
+    "answers the actual question",
+    "uses explicit GameState",
+    "uses retrieved strategy evidence",
+    "distinguishes fact from community opinion",
+    "contains no unsupported current-meta assertion",
+    "expresses uncertainty appropriately",
+    "gives actionable but not falsely precise advice"
+  ],
+  "cases": [
+    {"id":"pure_001","slice":"pure_strategy","prompt":"Blossom Ahri在18.1的Stage 4一般如何运营？请按收录攻略回答。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-blossom-ahri","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"pure_002","slice":"pure_strategy","prompt":"Vanguard Aphelios什么时候才考虑升9？请查当前收录攻略。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-vanguard-aphelios","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"pure_003","slice":"pure_strategy","prompt":"Draven Fast 9中途经济不够时攻略建议怎么转？","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-draven-fast9","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"structured_001","slice":"structured_only","prompt":"Alistar在同步Data Dragon里是几费？","expected_tools":["get_champion_info"],"allowed_tools":["get_champion_info"],"required_source_type":null,"required_document_id":null,"expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"shop_001","slice":"shop_only","prompt":"查询16.17补丁7级的基础商店费用概率。","expected_tools":["get_shop_odds"],"allowed_tools":["get_shop_odds"],"required_source_type":null,"required_document_id":null,"expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"state_001","slice":"strategy_game_state","prompt":"我现在4-2，7级，35血，40金币，正在玩Blossom Ahri，核心单位：Ahri、Sett；核心质量不足，现在继续D还是升8？请以收录攻略为策略证据。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-blossom-ahri","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"state_002","slice":"strategy_game_state","prompt":"我现在4-1，7级，28血，45金币，正在玩Vanguard Aphelios，核心单位：Aphelios、Brambleback；前排没升级，现在该搜还是硬上人口？","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-vanguard-aphelios","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"state_003","slice":"strategy_game_state","prompt":"我现在4-2，8级，42血，50金币，正在玩Draven Fast 9，核心单位：Draven、Maokai；连胜断了且经济不够舒适，继续冲9还是转阵容？","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-draven-fast9","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"multi_001","slice":"structured_strategy","prompt":"先查 champion_id=DA_18_Ahri 的 Ahri 在同步 Data Dragon 中的费用，再结合18.1 Blossom Ahri攻略说明这套阵容的Stage 4核心升级重点。","expected_tools":["get_champion_info","search_game_knowledge"],"allowed_tools":["get_champion_info","search_game_knowledge"],"required_source_type":"community_strategy","required_document_id":"bunnymuffins-18.1-blossom-ahri","expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"missing_001","slice":"missing_strategy_context","prompt":"我现在4-2，7级，35血，40金币，正在玩这套阵容，核心质量不足，我该D还是升人口？","expected_tools":[],"allowed_tools":[],"required_source_type":null,"required_document_id":null,"expected_status":"waiting_for_context","expect_knowledge_not_found":false},
+    {"id":"none_001","slice":"no_answer","prompt":"Solar Kayle在18.1应该怎么运营？当前小型语料没覆盖就明确停止。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":null,"required_document_id":null,"expected_status":"completed","expect_knowledge_not_found":true},
+    {"id":"hard_001","slice":"hard_negative","prompt":"18.1排位赛结算奖励是什么？如果chunk不支持奖励信息就不要把Systems当答案。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":null,"required_document_id":null,"expected_status":"completed","expect_knowledge_not_found":false},
+    {"id":"hard_002","slice":"hard_negative","prompt":"Wisp怎么站位？语料只有机制没有站位时不要调用无关工具。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":null,"required_document_id":null,"expected_status":"completed","expect_knowledge_not_found":true},
+    {"id":"hard_003","slice":"hard_negative","prompt":"某社区作者FictionalCoach推荐什么阵容？语料没有该作者就不要编。","expected_tools":["search_game_knowledge"],"allowed_tools":["search_game_knowledge"],"required_source_type":null,"required_document_id":null,"expected_status":"completed","expect_knowledge_not_found":false}
+  ]
+}
