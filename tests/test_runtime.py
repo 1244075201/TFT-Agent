@@ -89,6 +89,25 @@ class ArgumentMCPClient(FakeMCPClient):
         ]
 
 
+class KnowledgeMCPClient(FakeMCPClient):
+    async def list_tools(self) -> list[MCPToolDefinition]:
+        return [
+            MCPToolDefinition(
+                name="search_game_knowledge",
+                description="Search controlled knowledge",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "strategy_topic": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+
 def make_state(max_steps: int = 3) -> AgentState:
     return AgentState(game_state=GameState(), goal="decide", max_steps=max_steps)
 
@@ -392,6 +411,100 @@ async def test_supported_tool_argument_executes() -> None:
     assert result.status == AgentStatus.COMPLETED
     assert len(mcp.calls) == 1
     assert result.trace.tool_argument_validation.executed_tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_knowledge_query_is_canonicalized_to_original_user_question() -> None:
+    state = AgentState(
+        game_state=GameState(user_question="Original complete question"),
+        goal="Original complete question",
+    )
+    mcp = KnowledgeMCPClient()
+    llm = FakeLLMClient(
+        [
+            AgentDecision(
+                action=AgentAction.TOOL_CALL,
+                tool_call=ToolCall(
+                    id="search",
+                    name="search_game_knowledge",
+                    arguments={"query": "provider paraphrase"},
+                ),
+            ),
+            AgentDecision(
+                action=AgentAction.FINAL,
+                final_response=FinalResponse(recommendation="Grounded result"),
+            ),
+        ]
+    )
+
+    result = await AgentRuntime(llm, mcp).run(state)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert mcp.calls[0].arguments["query"] == "Original complete question"
+    assert result.trace.tool_argument_validation.executed_tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_knowledge_transport_default_is_not_treated_as_user_claim() -> None:
+    state = AgentState(
+        game_state=GameState(user_question="Original complete question"),
+        goal="Original complete question",
+    )
+    mcp = KnowledgeMCPClient()
+    llm = FakeLLMClient(
+        [
+            AgentDecision(
+                action=AgentAction.TOOL_CALL,
+                tool_call=ToolCall(
+                    id="search",
+                    name="search_game_knowledge",
+                    arguments={"query": "Original complete question", "top_k": 4},
+                ),
+            ),
+            AgentDecision(
+                action=AgentAction.FINAL,
+                final_response=FinalResponse(recommendation="Grounded result"),
+            ),
+        ]
+    )
+
+    result = await AgentRuntime(llm, mcp).run(state)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert mcp.calls[0].arguments == {"query": "Original complete question"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_strategy_topic_is_omitted_instead_of_forcing_false_no_result() -> None:
+    state = AgentState(
+        game_state=GameState(user_question="How should I play at Stage 4?"),
+        goal="How should I play at Stage 4?",
+    )
+    mcp = KnowledgeMCPClient()
+    llm = FakeLLMClient(
+        [
+            AgentDecision(
+                action=AgentAction.TOOL_CALL,
+                tool_call=ToolCall(
+                    id="search",
+                    name="search_game_knowledge",
+                    arguments={
+                        "query": "How should I play at Stage 4?",
+                        "strategy_topic": "Stage 4",
+                    },
+                ),
+            ),
+            AgentDecision(
+                action=AgentAction.FINAL,
+                final_response=FinalResponse(recommendation="Grounded result"),
+            ),
+        ]
+    )
+
+    result = await AgentRuntime(llm, mcp).run(state)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert mcp.calls[0].arguments == {"query": "How should I play at Stage 4?"}
 
 
 @pytest.mark.asyncio

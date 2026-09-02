@@ -93,6 +93,25 @@ class AgentRuntime:
         trace = state.trace.tool_argument_validation
         trace.proposed_tool_calls += 1
         registry = build_evidence_registry(state)
+        if tool_call.name == "search_game_knowledge":
+            # The retrieval contract requires the complete original question. Canonicalize this
+            # one transport argument deterministically instead of trusting provider paraphrases.
+            arguments = {
+                **tool_call.arguments,
+                "query": state.game_state.user_question or state.goal,
+            }
+            # Explicitly restating the transport default adds no user-derived meaning.
+            if arguments.get("top_k") == 4:
+                arguments.pop("top_k")
+            topic = arguments.get("strategy_topic")
+            allowed_topics = {
+                value
+                for ref, value in registry.items()
+                if ref.endswith(".strategy_topic") and isinstance(value, str)
+            }
+            if isinstance(topic, str) and topic not in allowed_topics:
+                arguments.pop("strategy_topic")
+            tool_call = tool_call.model_copy(update={"arguments": arguments})
         if (
             tool_call.name == "search_game_knowledge"
             and state.game_state.comp_name is not None
@@ -130,6 +149,11 @@ class AgentRuntime:
             result.status == NumericClaimStatus.INVALID_REFERENCE for result in results
         )
         if any(result.status != NumericClaimStatus.SUPPORTED for result in results):
+            trace.rejected_arguments.extend(
+                f"{result.claim.argument_name}:{result.status.value}"
+                for result in results
+                if result.status != NumericClaimStatus.SUPPORTED
+            )
             trace.blocked_tool_calls += 1
             return None
         trace.executed_tool_calls += 1

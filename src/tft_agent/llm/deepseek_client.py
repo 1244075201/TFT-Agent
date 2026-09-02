@@ -43,7 +43,7 @@ from tft_agent.llm.deepseek_messages import (
     build_provider_tools,
     normalize_provider_response,
 )
-from tft_agent.llm.evidence import build_evidence_registry
+from tft_agent.llm.evidence import build_evidence_alias_registry, build_evidence_registry
 from tft_agent.llm.numeric_claims import NumericClaimValidator, NumericValidationReport
 from tft_agent.llm.qualitative_claims import QualitativeRecommendationValidator
 from tft_agent.mcp_client.client import MCPToolDefinition
@@ -118,19 +118,96 @@ class DeepSeekLLMClient:
             )
             raise
         latency_ms = (perf_counter() - started) * 1000
-        decision = normalize_provider_response(response, tool_list, state)
+        repaired_invalid_envelope = False
+        try:
+            decision = normalize_provider_response(response, tool_list, state)
+        except LLMProviderError as error:
+            if error.code != "MALFORMED_PROVIDER_RESPONSE":
+                raise
+            state.trace.finalization.invalid_envelope_count += 1
+            state.trace.llm_calls.append(
+                LLMCallTrace(
+                    call_index=len(state.trace.llm_calls) + 1,
+                    model=self._model,
+                    latency_ms=latency_ms,
+                    outcome="provider_envelope_invalid",
+                    token_usage=_extract_usage(response),
+                )
+            )
+            decision = await self._repair_finalization(
+                state, request, tool_list, "provider_envelope_invalid"
+            )
+            repaired_invalid_envelope = True
+        if not repaired_invalid_envelope:
+            state.trace.llm_calls.append(
+                LLMCallTrace(
+                    call_index=len(state.trace.llm_calls) + 1,
+                    model=self._model,
+                    latency_ms=latency_ms,
+                    outcome=decision.action.value,
+                    token_usage=_extract_usage(response),
+                )
+            )
+        if decision.action == AgentAction.REQUEST_CONTEXT and _request_context_is_premature(
+            decision, state
+        ):
+            state.trace.finalization.premature_request_context_count += 1
+            decision = await self._repair_finalization(
+                state, request, tool_list, "premature_request_context"
+            )
+        if decision.action != AgentAction.FINAL:
+            return decision
+        return await self._enforce_numeric_claims(state, tool_list, request, decision)
+
+    async def _repair_finalization(
+        self,
+        state: AgentState,
+        initial_request: dict[str, Any],
+        tools: list[MCPToolDefinition],
+        reason: str,
+    ) -> AgentDecision:
+        """Spend one bounded retry on an invalid orchestration action."""
+
+        trace = state.trace.finalization
+        if trace.repair_count >= 2:
+            raise LLMProviderError(
+                "FINALIZATION_REPAIR_EXHAUSTED",
+                "Finalization repair budget exhausted",
+                False,
+            )
+        trace.repair_count += 1
+        trace.repair_reasons.append(reason)
+        aliases = build_evidence_alias_registry(state)
+        feedback = (
+            f"Your previous action failed finalization validation: {reason}. "
+            "All successful observations shown in ACCUMULATED CURRENT-TASK EVIDENCE remain "
+            "available. Do not request a field already present. Continue with the next materially "
+            "useful tool call if evidence is still required; otherwise return exactly one valid "
+            "FINAL envelope that directly answers the user's core question. Do not combine FINAL "
+            "with REQUEST_CONTEXT. Use only these evidence aliases: "
+            f"{json.dumps(list(aliases), ensure_ascii=False)}."
+        )
+        repair_request = {
+            **initial_request,
+            "messages": [*initial_request["messages"], {"role": "user", "content": feedback}],
+            "tools": build_provider_tools(tools),
+            "tool_choice": "auto",
+        }
+        started = perf_counter()
+        response = await self._complete_with_retry(repair_request)
+        decision = normalize_provider_response(response, tools, state)
         state.trace.llm_calls.append(
             LLMCallTrace(
                 call_index=len(state.trace.llm_calls) + 1,
                 model=self._model,
-                latency_ms=latency_ms,
-                outcome=decision.action.value,
+                latency_ms=(perf_counter() - started) * 1000,
+                outcome="finalization_repair",
                 token_usage=_extract_usage(response),
             )
         )
-        if decision.action != AgentAction.FINAL:
-            return decision
-        return await self._enforce_numeric_claims(state, tool_list, request, decision)
+        if decision.action != AgentAction.REQUEST_CONTEXT:
+            trace.repair_success += 1
+        return decision
 
     async def _enforce_numeric_claims(
         self,
@@ -164,6 +241,8 @@ class DeepSeekLLMClient:
                 else []
             ),
         )
+        if qualitative.status == QualitativeClaimStatus.INVALID_REFERENCE:
+            state.trace.finalization.invalid_evidence_ref_count += 1
         trace = _validation_trace(
             report,
             validation_ms,
@@ -179,6 +258,15 @@ class DeepSeekLLMClient:
             return decision
 
         trace.correction_attempted = True
+        finalization_trace = state.trace.finalization
+        if finalization_trace.repair_count >= 2:
+            trace.fallback_used = True
+            finalization_trace.deterministic_fallback_count += 1
+            return _safe_fallback(
+                report, decision.final_response.strategy_recommendation, qualitative.valid
+            )
+        finalization_trace.repair_count += 1
+        finalization_trace.repair_reasons.append("numeric_or_evidence_validation")
         correction_request = {
             "model": self._model,
             "messages": [
@@ -192,9 +280,12 @@ class DeepSeekLLMClient:
         try:
             response = await self._complete_with_retry(correction_request)
             correction = normalize_provider_response(response, [], state)
-        except LLMProviderError:
+        except LLMProviderError as error:
+            if error.code == "MALFORMED_PROVIDER_RESPONSE":
+                finalization_trace.invalid_envelope_count += 1
             trace.correction_latency_ms = (perf_counter() - started) * 1000
             trace.fallback_used = True
+            finalization_trace.deterministic_fallback_count += 1
             fallback = _safe_fallback(
                 report, decision.final_response.strategy_recommendation, qualitative.valid
             )
@@ -233,6 +324,7 @@ class DeepSeekLLMClient:
                 )
             ):
                 trace.correction_succeeded = True
+                finalization_trace.repair_success += 1
                 qualitative_trace = state.trace.qualitative_recommendation_validation
                 assert qualitative_trace is not None
                 qualitative_trace.status = QualitativeClaimStatus.SUPPORTED
@@ -244,6 +336,7 @@ class DeepSeekLLMClient:
             trace.correction_succeeded = True
             return correction
         trace.fallback_used = True
+        finalization_trace.deterministic_fallback_count += 1
         fallback = _safe_fallback(
             report, decision.final_response.strategy_recommendation, qualitative.valid
         )
@@ -376,7 +469,9 @@ def _correction_feedback(
     ]
     if not decision.numeric_claims_declared:
         failures.append({"status": "missing_numeric_claim_envelope"})
-    refs = _available_strategy_refs(state)
+    aliases = build_evidence_alias_registry(state)
+    strategy_refs = set(_available_strategy_refs(state))
+    refs = [alias for alias, ref in aliases.items() if ref in strategy_refs]
     return (
         "Repair only the final output. Unsupported or invalid numeric claims are: "
         f"{json.dumps(failures, ensure_ascii=False)}. Rewrite the answer while preserving "
@@ -385,7 +480,7 @@ def _correction_feedback(
         "numbers. Preserve the original strategy recommendation only with its verified "
         "strategy_recommendation evidence_refs. Return only the segmented supported_facts + "
         "qualitative_recommendation object envelope. "
-        f"Verified current-task strategy refs are: {json.dumps(refs)}. "
+        f"Verified current-task strategy aliases are: {json.dumps(refs)}. "
         "If a responsible answer requires missing user facts, return the request_context envelope "
         "instead. Do not call tools."
     )
@@ -415,6 +510,58 @@ def _available_strategy_refs(state: AgentState) -> list[str]:
 
 def _strategy_recommendation_required(state: AgentState) -> bool:
     return bool(_available_strategy_refs(state))
+
+
+def _request_context_is_premature(decision: AgentDecision, state: AgentState) -> bool:
+    """Reject context requests after successful evidence or for an already present field."""
+
+    if any(record.result.success for record in state.tool_history):
+        return True
+    registry = build_evidence_registry(state)
+    available_fields = {path.rsplit(".", 1)[-1].casefold() for path in registry}
+    for missing in decision.missing_context:
+        normalized = re.sub(r"[^a-z0-9_]+", " ", missing.casefold())
+        if any(field in normalized.split() for field in available_fields if len(field) > 1):
+            return True
+    # REQUEST_CONTEXT is only for facts the user can supply. Missing corpus coverage,
+    # confidence, or explanation is an honest-final condition rather than a waiting state.
+    user_context_terms = (
+        "level",
+        "health",
+        "hp",
+        "gold",
+        "stage",
+        "patch",
+        "comp",
+        "composition",
+        "core unit",
+        "champion",
+        "target",
+        "board",
+        "bench",
+        "item",
+        "augment",
+        "shop",
+        "等级",
+        "血量",
+        "金币",
+        "阶段",
+        "版本",
+        "阵容",
+        "核心",
+        "英雄",
+        "目标",
+        "棋盘",
+        "备战席",
+        "装备",
+        "强化符文",
+        "商店",
+    )
+    return not any(
+        term in missing.casefold()
+        for missing in decision.missing_context
+        for term in user_context_terms
+    )
 
 
 def _safe_fallback(

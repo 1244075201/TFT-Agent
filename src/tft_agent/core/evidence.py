@@ -6,6 +6,7 @@ from tft_agent.agent.state import AgentState
 
 EvidenceValue = int | float | str
 EvidenceRegistry = dict[str, EvidenceValue]
+EvidenceAliasRegistry = dict[str, str]
 
 
 def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
@@ -55,6 +56,31 @@ def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
                     knowledge_prefix = f"knowledge.{record.tool_call.id}.{chunk['chunk_id']}"
                     _register_scalars(registry, chunk, knowledge_prefix)
     return registry
+
+
+def build_evidence_alias_registry(state: AgentState) -> EvidenceAliasRegistry:
+    """Assign short, current-task aliases to citeable evidence paths."""
+
+    registry = build_evidence_registry(state)
+    refs: list[str] = [
+        path
+        for path in registry
+        if path.startswith("game_state.") or (path.startswith("tool.") and ".data." in path)
+    ]
+    for record in state.tool_history:
+        if record.tool_call.name != "search_game_knowledge" or not isinstance(
+            record.result.data, dict
+        ):
+            continue
+        chunks = record.result.data.get("results")
+        if not isinstance(chunks, list):
+            continue
+        refs.extend(
+            f"knowledge.{record.tool_call.id}.{chunk['chunk_id']}"
+            for chunk in chunks
+            if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str)
+        )
+    return {f"E{index}": ref for index, ref in enumerate(dict.fromkeys(refs), start=1)}
 
 
 def _register_scalars(

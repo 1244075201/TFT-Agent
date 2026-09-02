@@ -55,6 +55,20 @@ def test_parser_extracts_explicit_named_strategy_entity() -> None:
     assert state.comp_name == "Solar Kayle"
 
 
+def test_parser_extracts_named_comp_before_versioned_stage_question() -> None:
+    state = GameStateParser().parse_text(
+        "Blossom Ahri在18.1的Stage 4一般如何运营？请按收录攻略回答。"
+    )
+
+    assert state.comp_name == "Blossom Ahri"
+
+
+def test_parser_preserves_numeric_suffix_in_explicit_comp_name() -> None:
+    state = GameStateParser().parse_text("Draven Fast 9中途经济不够时攻略建议怎么转？")
+
+    assert state.comp_name == "Draven Fast 9"
+
+
 def test_parser_extracts_named_comp_before_guide_reference() -> None:
     state = GameStateParser().parse_text(
         "查DA_18_Ahri费用，再结合18.1 Blossom Ahri攻略说明这套阵容。"

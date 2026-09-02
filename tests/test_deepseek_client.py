@@ -9,6 +9,7 @@ import pytest
 from openai import APITimeoutError, AsyncOpenAI
 
 from tft_agent.agent.state import AgentState
+from tft_agent.core.evidence import build_evidence_alias_registry
 from tft_agent.core.exceptions import LLMProviderError
 from tft_agent.core.schemas import (
     AgentAction,
@@ -73,6 +74,51 @@ def state() -> AgentState:
 
 def numeric_envelope(answer: str, claims: list[dict[str, Any]]) -> SimpleNamespace:
     return response(content=json.dumps({"answer": answer, "numeric_claims": claims}))
+
+
+def strategy_state() -> AgentState:
+    agent_state = AgentState(
+        game_state=GameState(comp_name="Blossom Ahri", user_question="Should I roll?"),
+        goal="Should I roll?",
+        current_patch="18.1",
+    )
+    now = datetime.now(UTC)
+    champion_call = ToolCall(id="champion-1", name="get_champion_info", arguments={})
+    champion_result = ToolResult(
+        tool_call_id=champion_call.id,
+        success=True,
+        data={"name": "Ahri", "cost": 4},
+        metadata=ToolMetadata(source="riot-data-dragon"),
+    )
+    strategy_call = ToolCall(id="search-1", name="search_game_knowledge", arguments={})
+    strategy_result = ToolResult(
+        tool_call_id=strategy_call.id,
+        success=True,
+        data={
+            "results": [
+                {
+                    "chunk_id": "blossom:2",
+                    "source_type": "community_strategy",
+                    "document_type": "strategy_guide",
+                    "game_patch": "18.1",
+                    "strategy_comp_names": ["Blossom Ahri"],
+                    "strategy_topics": ["roll_decision"],
+                    "text": "Improve Ahri and Sett before leveling.",
+                }
+            ]
+        },
+    )
+    for call, result in ((champion_call, champion_result), (strategy_call, strategy_result)):
+        agent_state.tool_history.append(
+            ToolCallRecord(
+                tool_call=call,
+                result=result,
+                started_at=now,
+                finished_at=now,
+                latency_ms=0,
+            )
+        )
+    return agent_state
 
 
 @pytest.mark.asyncio
@@ -165,7 +211,7 @@ async def test_segmented_final_envelope_is_assembled() -> None:
 
     assert decision.final_response is not None
     assert decision.final_response.recommendation == (
-        "You currently have 35 HP.\n\nKeep the recommendation qualitative."
+        "Keep the recommendation qualitative.\n\nYou currently have 35 HP."
     )
     assert agent_state.trace.numeric_claim_validation is not None
     assert agent_state.trace.numeric_claim_validation.supported_claims == 1
@@ -198,8 +244,55 @@ async def test_segmented_envelope_is_extracted_from_provider_preface() -> None:
     decision = await client_with_create(create).generate(agent_state, [])
 
     assert decision.final_response is not None
-    assert decision.final_response.recommendation.startswith("Current gold is 40.")
+    assert decision.final_response.recommendation.startswith("This matches the supplied fact.")
     assert create.await_count == 1
+    assert agent_state.trace.finalization.normalized_wrapped_envelope_count == 1
+
+
+@pytest.mark.asyncio
+async def test_incomplete_json_envelope_is_repaired_once() -> None:
+    create = AsyncMock(
+        side_effect=[
+            response(content='{"supported_facts":['),
+            response(
+                content=json.dumps(
+                    {
+                        "supported_facts": [],
+                        "qualitative_recommendation": "Answer without unsupported precision.",
+                    }
+                )
+            ),
+        ]
+    )
+    agent_state = state()
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.action == AgentAction.FINAL
+    assert create.await_count == 2
+    assert agent_state.trace.finalization.invalid_envelope_count == 1
+    assert agent_state.trace.finalization.repair_count == 1
+    assert agent_state.trace.finalization.repair_success == 1
+    assert len(agent_state.trace.llm_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_two_conflicting_envelopes_are_rejected_then_repaired() -> None:
+    first = json.dumps({"supported_facts": [], "qualitative_recommendation": "First answer."})
+    second = json.dumps(
+        {"supported_facts": [], "qualitative_recommendation": "Conflicting answer."}
+    )
+    repaired = json.dumps({"supported_facts": [], "qualitative_recommendation": "Single answer."})
+    create = AsyncMock(
+        side_effect=[response(content=f"{first}\n{second}"), response(content=repaired)]
+    )
+    agent_state = state()
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.final_response is not None
+    assert decision.final_response.recommendation == "Single answer."
+    assert agent_state.trace.finalization.invalid_envelope_count == 1
 
 
 @pytest.mark.asyncio
@@ -259,6 +352,211 @@ async def test_explicit_request_context_envelope_is_normalized() -> None:
 
     assert decision.action == AgentAction.REQUEST_CONTEXT
     assert decision.missing_context == ["champion name"]
+
+
+@pytest.mark.asyncio
+async def test_structured_missing_context_claim_is_normalized() -> None:
+    create = AsyncMock(
+        return_value=response(
+            content=json.dumps(
+                {
+                    "action": "request_context",
+                    "missing_context": [
+                        {
+                            "field": "champion name",
+                            "reason": "needed for lookup",
+                            "required_for": "champion identity",
+                        }
+                    ],
+                }
+            )
+        )
+    )
+
+    decision = await client_with_create(create).generate(state(), [tool_definition()])
+
+    assert decision.action == AgentAction.REQUEST_CONTEXT
+    assert decision.missing_context == ["champion name"]
+
+
+@pytest.mark.asyncio
+async def test_premature_request_for_resolved_context_is_repaired() -> None:
+    agent_state = strategy_state()
+    strategy_alias = next(
+        alias
+        for alias, ref in build_evidence_alias_registry(agent_state).items()
+        if ref == "knowledge.search-1.blossom:2"
+    )
+    create = AsyncMock(
+        side_effect=[
+            response(
+                content=json.dumps(
+                    {"action": "request_context", "missing_context": ["champion cost"]}
+                )
+            ),
+            response(
+                content=json.dumps(
+                    {
+                        "supported_facts": [],
+                        "qualitative_recommendation": {
+                            "text": "Improve the core pair before leveling.",
+                            "evidence_refs": [strategy_alias],
+                        },
+                    }
+                )
+            ),
+        ]
+    )
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.action == AgentAction.FINAL
+    assert agent_state.trace.finalization.premature_request_context_count == 1
+    assert agent_state.trace.finalization.repair_count == 1
+    assert agent_state.trace.finalization.repair_success == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_corpus_evidence_is_not_treated_as_user_context() -> None:
+    create = AsyncMock(
+        side_effect=[
+            response(
+                content=json.dumps(
+                    {"action": "request_context", "missing_context": ["strategy evidence"]}
+                )
+            ),
+            response(
+                content=json.dumps(
+                    {
+                        "supported_facts": [],
+                        "qualitative_recommendation": (
+                            "The available corpus does not establish an answer."
+                        ),
+                    }
+                )
+            ),
+        ]
+    )
+    agent_state = state()
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.action == AgentAction.FINAL
+    assert agent_state.trace.finalization.premature_request_context_count == 1
+
+
+@pytest.mark.asyncio
+async def test_current_task_evidence_alias_resolves_to_canonical_reference() -> None:
+    agent_state = strategy_state()
+    strategy_alias = next(
+        alias
+        for alias, ref in build_evidence_alias_registry(agent_state).items()
+        if ref == "knowledge.search-1.blossom:2"
+    )
+    game_alias = next(
+        alias
+        for alias, ref in build_evidence_alias_registry(agent_state).items()
+        if ref == "game_state.comp_name"
+    )
+    create = AsyncMock(
+        return_value=response(
+            content=json.dumps(
+                {
+                    "supported_facts": [],
+                    "qualitative_recommendation": {
+                        "text": "Improve the core pair before leveling.",
+                        "evidence_refs": [strategy_alias, game_alias],
+                    },
+                }
+            )
+        )
+    )
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.final_response is not None
+    recommendation = decision.final_response.strategy_recommendation
+    assert recommendation is not None
+    assert recommendation.evidence_refs == ["knowledge.search-1.blossom:2"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_evidence_alias_remains_invalid() -> None:
+    agent_state = strategy_state()
+    invalid = {
+        "supported_facts": [],
+        "qualitative_recommendation": {
+            "text": "Improve the core pair before leveling.",
+            "evidence_refs": ["E999"],
+        },
+    }
+    create = AsyncMock(
+        side_effect=[
+            response(content=json.dumps(invalid)),
+            response(content=json.dumps(invalid)),
+        ]
+    )
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.final_response is not None
+    assert decision.final_response.strategy_recommendation is None
+    assert agent_state.trace.finalization.invalid_evidence_ref_count == 1
+    assert agent_state.trace.numeric_claim_validation is not None
+    assert agent_state.trace.numeric_claim_validation.fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_final_and_request_context_are_mutually_exclusive() -> None:
+    invalid = {
+        "action": "request_context",
+        "missing_context": ["level"],
+        "supported_facts": [],
+        "qualitative_recommendation": "Conflicting final.",
+    }
+    valid = {"supported_facts": [], "qualitative_recommendation": "Single final."}
+    create = AsyncMock(
+        side_effect=[
+            response(content=json.dumps(invalid)),
+            response(content=json.dumps(valid)),
+        ]
+    )
+    agent_state = state()
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.action == AgentAction.FINAL
+    assert agent_state.trace.finalization.invalid_envelope_count == 1
+
+
+@pytest.mark.asyncio
+async def test_accumulated_multi_tool_evidence_and_aliases_reach_final_prompt() -> None:
+    agent_state = strategy_state()
+    strategy_alias = next(
+        alias
+        for alias, ref in build_evidence_alias_registry(agent_state).items()
+        if ref == "knowledge.search-1.blossom:2"
+    )
+    create = AsyncMock(
+        return_value=response(
+            content=json.dumps(
+                {
+                    "supported_facts": [],
+                    "qualitative_recommendation": {
+                        "text": "Improve the core pair before leveling.",
+                        "evidence_refs": [strategy_alias],
+                    },
+                }
+            )
+        )
+    )
+    await client_with_create(create).generate(agent_state, [])
+
+    assert create.await_args is not None
+    system = create.await_args.kwargs["messages"][0]["content"]
+    assert '"cost":4' in system
+    assert '"chunk_id":"blossom:2"' in system
+    assert f'"{strategy_alias}":{{"kind":"knowledge"' in system
+    assert "knowledge.search-1.blossom:2" not in system
 
 
 @pytest.mark.asyncio

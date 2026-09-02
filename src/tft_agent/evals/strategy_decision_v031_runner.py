@@ -69,6 +69,7 @@ async def run_case(
     usage = [call.token_usage for call in state.trace.llm_calls if call.token_usage is not None]
     validation = state.trace.numeric_claim_validation
     qualitative = state.trace.qualitative_recommendation_validation
+    finalization = state.trace.finalization
     detected_unsupported = validation.unsupported_claims if validation else 0
     final_unsupported = (
         0
@@ -114,6 +115,7 @@ async def run_case(
         "tool_sequence": sequence,
         "tool_arguments": [record.tool_call.arguments for record in state.tool_history],
         "final_status": state.status.value,
+        "missing_context": state.missing_context,
         "failure_reason": state.failure_reason,
         "knowledge_error_codes": errors,
         "source_types": source_types,
@@ -137,11 +139,20 @@ async def run_case(
         "facts_only_fallback": bool(
             validation and validation.fallback_used and recommendation is None
         ),
+        "invalid_envelope_count": finalization.invalid_envelope_count,
+        "normalized_wrapped_envelope_count": finalization.normalized_wrapped_envelope_count,
+        "invalid_evidence_ref_count": finalization.invalid_evidence_ref_count,
+        "premature_request_context_count": finalization.premature_request_context_count,
+        "finalization_repair_count": finalization.repair_count,
+        "finalization_repair_success": finalization.repair_success,
+        "deterministic_finalization_fallback_count": (finalization.deterministic_fallback_count),
+        "finalization_repair_reasons": finalization.repair_reasons,
         "unauthorized_tool_arguments": (
             arguments.unsupported_argument_claims
             + arguments.mismatched_argument_claims
             + arguments.invalid_reference_argument_claims
         ),
+        "rejected_tool_arguments": arguments.rejected_arguments,
         "agent_steps": state.step_count,
         "llm_calls": len(state.trace.llm_calls),
         "tool_latency_ms": tool_latency,
@@ -214,6 +225,15 @@ async def run(args: argparse.Namespace) -> None:
             bool(result.get("qualitative_recommendation_preserved")) for result in results
         ),
         "facts_only_fallbacks": sum(bool(result.get("facts_only_fallback")) for result in results),
+        "invalid_envelope_count": _sum_int(results, "invalid_envelope_count"),
+        "normalized_wrapped_envelope_count": _sum_int(results, "normalized_wrapped_envelope_count"),
+        "invalid_evidence_ref_count": _sum_int(results, "invalid_evidence_ref_count"),
+        "premature_request_context_count": _sum_int(results, "premature_request_context_count"),
+        "finalization_repair_count": _sum_int(results, "finalization_repair_count"),
+        "finalization_repair_success": _sum_int(results, "finalization_repair_success"),
+        "deterministic_finalization_fallback_count": _sum_int(
+            results, "deterministic_finalization_fallback_count"
+        ),
         "manual_quality_rubric": dataset.manual_quality_rubric,
         "results": results,
     }
@@ -221,6 +241,10 @@ async def run(args: argparse.Namespace) -> None:
     output = args.output_dir / f"strategy_decision_v031_{datetime.now(UTC):%Y%m%d_%H%M%S}.json"
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"passed={payload['passed']}/{len(results)} output={output}")
+
+
+def _sum_int(results: list[dict[str, object]], key: str) -> int:
+    return sum(value for result in results if isinstance((value := result.get(key)), int))
 
 
 def main() -> None:

@@ -19,8 +19,8 @@ from tft_agent.core.schemas import (
     ToolCallRecord,
 )
 from tft_agent.llm.evidence import (
+    build_evidence_alias_registry,
     build_evidence_context,
-    build_evidence_registry,
     evidence_field_paths,
 )
 from tft_agent.llm.prompts import build_system_prompt
@@ -36,7 +36,6 @@ def build_provider_messages(
 
     question = state.game_state.user_question or state.goal
     evidence = build_evidence_context(state)
-    evidence["evidence_registry"] = build_evidence_registry(state)
     state.trace.grounded_evidence_fields = evidence_field_paths(evidence)
     user_content = question
     messages: list[dict[str, Any]] = [
@@ -133,18 +132,26 @@ def normalize_provider_response(
         # preserving JSON structure and claim validation at our domain boundary.
         payload = json.loads(content, strict=False)
     except json.JSONDecodeError:
-        payload = _embedded_envelope(content)
+        payload = _embedded_envelope(content, state)
         if payload is None:
+            if "{" in content or "}" in content:
+                raise _malformed(
+                    "DeepSeek returned an incomplete or malformed JSON envelope"
+                ) from None
             return _plain_final(content)
     if not isinstance(payload, dict):
         return _plain_final(content)
     if payload.get("action") == AgentAction.REQUEST_CONTEXT.value:
-        missing = payload.get("missing_context")
-        if (
-            not isinstance(missing, list)
-            or not missing
-            or not all(isinstance(x, str) for x in missing)
+        if any(
+            key in payload for key in ("supported_facts", "qualitative_recommendation", "answer")
         ):
+            raise _malformed("final and request_context actions are mutually exclusive")
+        missing = payload.get("missing_context")
+        if isinstance(missing, str) and missing.strip():
+            missing = [missing]
+        elif isinstance(missing, list):
+            missing = [_missing_context_field(item) for item in missing]
+        if not isinstance(missing, list) or not missing or not all(missing):
             raise _malformed("request_context requires a non-empty string array")
         return AgentDecision(action=AgentAction.REQUEST_CONTEXT, missing_context=missing)
     if "answer" in payload:
@@ -153,7 +160,10 @@ def normalize_provider_response(
         if not isinstance(answer, str) or not answer.strip() or not isinstance(raw_claims, list):
             raise _malformed("numeric final envelope requires answer and numeric_claims array")
         try:
-            claims = [NumericClaim.model_validate(item) for item in raw_claims]
+            claims = [
+                NumericClaim.model_validate(_resolve_claim_aliases(item, state))
+                for item in raw_claims
+            ]
         except PydanticValidationError as exc:
             raise _malformed("numeric final envelope contains an invalid claim") from exc
         return AgentDecision(
@@ -173,6 +183,13 @@ def normalize_provider_response(
             raw_refs = normalized_recommendation.get("evidence_refs")
             if isinstance(raw_refs, str):
                 normalized_recommendation["evidence_refs"] = [raw_refs]
+            if isinstance(normalized_recommendation.get("evidence_refs"), list):
+                resolved_refs = [
+                    _resolve_alias(ref, state) for ref in normalized_recommendation["evidence_refs"]
+                ]
+                normalized_recommendation["evidence_refs"] = _strategy_only_refs_when_supported(
+                    resolved_refs, state
+                )
             try:
                 strategy_recommendation = StrategyRecommendation.model_validate(
                     normalized_recommendation
@@ -205,11 +222,13 @@ def normalize_provider_response(
                     raise ValueError("invalid fact claims")
                 fact_texts.append(fact["text"].strip())
                 segment_claims.extend(
-                    NumericClaim.model_validate(item) for item in raw_segment_claims
+                    NumericClaim.model_validate(_resolve_claim_aliases(item, state))
+                    for item in raw_segment_claims
                 )
         except (PydanticValidationError, ValueError) as exc:
             raise _malformed("segmented final envelope contains an invalid fact") from exc
-        answer = "\n\n".join(text for text in [*fact_texts, recommendation.strip()] if text)
+        # The user's decision comes first; verified facts support it instead of burying it.
+        answer = "\n\n".join(text for text in [recommendation.strip(), *fact_texts] if text)
         if not answer:
             raise _malformed("segmented final envelope is empty")
         return AgentDecision(
@@ -237,10 +256,11 @@ def normalize_provider_response(
     )
 
 
-def _embedded_envelope(content: str) -> dict[str, Any] | None:
+def _embedded_envelope(content: str, state: AgentState) -> dict[str, Any] | None:
     """Extract only a recognized complete envelope when surrounded by provider prose."""
 
     decoder = json.JSONDecoder(strict=False)
+    matches: list[dict[str, Any]] = []
     for index, character in enumerate(content):
         if character != "{":
             continue
@@ -253,8 +273,58 @@ def _embedded_envelope(content: str) -> dict[str, Any] | None:
             or "supported_facts" in payload
             or "answer" in payload
         ):
-            return payload
+            matches.append(payload)
+    if len(matches) > 1:
+        raise _malformed("DeepSeek returned multiple conflicting final envelopes")
+    if matches:
+        state.trace.finalization.normalized_wrapped_envelope_count += 1
+        return matches[0]
     return None
+
+
+def _missing_context_field(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict) and isinstance(item.get("field"), str):
+        field = item["field"]
+        assert isinstance(field, str)
+        return field.strip()
+    return ""
+
+
+def _resolve_alias(ref: Any, state: AgentState) -> Any:
+    if not isinstance(ref, str):
+        return ref
+    return build_evidence_alias_registry(state).get(ref, ref)
+
+
+def _resolve_claim_aliases(item: Any, state: AgentState) -> Any:
+    if not isinstance(item, dict):
+        return item
+    resolved = dict(item)
+    resolved["evidence_ref"] = _resolve_alias(resolved.get("evidence_ref"), state)
+    derivation = resolved.get("derivation")
+    if isinstance(derivation, dict) and isinstance(derivation.get("inputs"), list):
+        resolved["derivation"] = {
+            **derivation,
+            "inputs": [_resolve_alias(value, state) for value in derivation["inputs"]],
+        }
+    return resolved
+
+
+def _strategy_only_refs_when_supported(refs: list[Any], state: AgentState) -> list[Any]:
+    """Drop auxiliary current-task facts only when valid strategy refs already support the claim."""
+
+    strategy_refs = set(_strategy_refs(state))
+    if not any(isinstance(ref, str) and ref in strategy_refs for ref in refs):
+        return refs
+    return [
+        ref
+        for ref in refs
+        if not isinstance(ref, str)
+        or ref in strategy_refs
+        or not (ref.startswith("game_state.") or ref.startswith("tool."))
+    ]
 
 
 def _strategy_refs(state: AgentState) -> list[str]:

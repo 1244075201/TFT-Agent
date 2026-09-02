@@ -3,7 +3,11 @@
 from typing import Any
 
 from tft_agent.agent.state import AgentState
-from tft_agent.core.evidence import EvidenceRegistry, build_evidence_registry
+from tft_agent.core.evidence import (
+    EvidenceRegistry,
+    build_evidence_alias_registry,
+    build_evidence_registry,
+)
 
 
 def build_evidence_context(state: AgentState) -> dict[str, Any]:
@@ -40,12 +44,16 @@ def build_evidence_context(state: AgentState) -> dict[str, Any]:
                 official_knowledge.append(result)
             elif result.get("source_type") == "community_strategy":
                 community_strategy_evidence.append(result)
+    aliases = build_evidence_alias_registry(state)
     return {
         "user_facts": user_facts,
         "tool_evidence": tool_evidence,
         "structured_evidence": structured_evidence,
         "official_knowledge": official_knowledge,
         "community_strategy_evidence": community_strategy_evidence,
+        "available_evidence_aliases": {
+            alias: _alias_description(ref, state) for alias, ref in aliases.items()
+        },
         "qualitative_reasoning": {
             "allowed": True,
             "must_not_impersonate_current_strategy_evidence": True,
@@ -58,6 +66,30 @@ def build_evidence_context(state: AgentState) -> dict[str, Any]:
             "from values above. Otherwise omit it, stay qualitative, or query useful evidence."
         ),
     }
+
+
+def _alias_description(ref: str, state: AgentState) -> dict[str, Any]:
+    registry = build_evidence_registry(state)
+    if ref in registry:
+        return {"kind": ref.split(".", 1)[0], "value": registry[ref]}
+    for record in state.tool_history:
+        if not ref.startswith(f"knowledge.{record.tool_call.id}.") or not isinstance(
+            record.result.data, dict
+        ):
+            continue
+        chunks = record.result.data.get("results")
+        if not isinstance(chunks, list):
+            continue
+        for chunk in chunks:
+            if isinstance(chunk, dict) and ref.endswith(f".{chunk.get('chunk_id')}"):
+                return {
+                    "kind": "knowledge",
+                    "title": chunk.get("title"),
+                    "heading": chunk.get("heading"),
+                    "source_type": chunk.get("source_type"),
+                    "game_patch": chunk.get("game_patch"),
+                }
+    return {"kind": "evidence"}
 
 
 def evidence_field_paths(context: dict[str, Any]) -> list[str]:
@@ -83,4 +115,8 @@ def _leaf_paths(value: dict[str, Any], prefix: str) -> list[str]:
     return paths
 
 
-__all__ = ["EvidenceRegistry", "build_evidence_registry"]
+__all__ = [
+    "EvidenceRegistry",
+    "build_evidence_alias_registry",
+    "build_evidence_registry",
+]

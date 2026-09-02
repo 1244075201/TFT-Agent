@@ -65,6 +65,19 @@ class QualitativeRecommendationTrace(StrictModel):
     preserved_after_repair: bool = False
 
 
+class FinalizationTrace(StrictModel):
+    """Bounded orchestration diagnostics without raw provider content."""
+
+    invalid_envelope_count: int = Field(default=0, ge=0)
+    normalized_wrapped_envelope_count: int = Field(default=0, ge=0)
+    invalid_evidence_ref_count: int = Field(default=0, ge=0)
+    premature_request_context_count: int = Field(default=0, ge=0)
+    repair_count: int = Field(default=0, ge=0)
+    repair_success: int = Field(default=0, ge=0)
+    deterministic_fallback_count: int = Field(default=0, ge=0)
+    repair_reasons: list[str] = Field(default_factory=list)
+
+
 class ToolArgumentValidationTrace(StrictModel):
     """Aggregate pre-execution argument provenance enforcement."""
 
@@ -77,6 +90,7 @@ class ToolArgumentValidationTrace(StrictModel):
     invalid_reference_argument_claims: int = Field(default=0, ge=0)
     blocked_tool_calls: int = Field(default=0, ge=0)
     request_context_due_to_argument_grounding: int = Field(default=0, ge=0)
+    rejected_arguments: list[str] = Field(default_factory=list)
 
 
 class AgentTrace(StrictModel):
@@ -94,6 +108,7 @@ class AgentTrace(StrictModel):
     grounded_evidence_fields: list[str] = Field(default_factory=list)
     numeric_claim_validation: NumericClaimValidationTrace | None = None
     qualitative_recommendation_validation: QualitativeRecommendationTrace | None = None
+    finalization: FinalizationTrace = Field(default_factory=FinalizationTrace)
     tool_argument_validation: ToolArgumentValidationTrace = Field(
         default_factory=ToolArgumentValidationTrace
     )
