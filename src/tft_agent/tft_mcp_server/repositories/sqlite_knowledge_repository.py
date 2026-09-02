@@ -33,11 +33,42 @@ class SQLiteKnowledgeRepository:
         game_patch: str | None = None,
         set_name: str | None = None,
         document_type: str | None = None,
+        source_type: str | None = None,
     ) -> list[KnowledgeChunk]:
         vector = await asyncio.to_thread(self._embeddings.embed_query, query)
         return await asyncio.to_thread(
-            self._search_sync, vector, limit, game_patch, set_name, document_type
+            self._search_sync,
+            vector,
+            limit,
+            game_patch,
+            set_name,
+            document_type,
+            source_type,
         )
+
+    def capability_summary(self) -> str:
+        """Describe only the source/document types and strategy titles actually stored."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT source_type, document_type, title FROM knowledge_documents "
+                "ORDER BY source_type, document_type, title"
+            ).fetchall()
+        if not rows:
+            return "The local knowledge corpus is empty."
+        coverage: dict[str, set[str]] = {}
+        strategy_titles: list[str] = []
+        for row in rows:
+            coverage.setdefault(row["source_type"], set()).add(row["document_type"])
+            if row["source_type"] == "community_strategy":
+                strategy_titles.append(row["title"])
+        groups = [
+            f"{source_type}: {', '.join(sorted(document_types))}"
+            for source_type, document_types in sorted(coverage.items())
+        ]
+        if strategy_titles:
+            groups.append("limited strategy guides: " + "; ".join(strategy_titles))
+        return "Local corpus coverage — " + " | ".join(groups)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
@@ -55,7 +86,10 @@ class SQLiteKnowledgeRepository:
             )
             data = document.model_dump(mode="json")
             connection.execute(
-                "INSERT INTO knowledge_documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO knowledge_documents (
+                    document_id, title, content, source, source_type, document_type,
+                    game_patch, set_name, language, published_at, retrieved_at, url, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     data["document_id"],
                     data["title"],
@@ -69,6 +103,7 @@ class SQLiteKnowledgeRepository:
                     data["published_at"],
                     data["retrieved_at"],
                     data["url"],
+                    data["updated_at"],
                 ),
             )
             connection.executemany(
@@ -97,6 +132,7 @@ class SQLiteKnowledgeRepository:
         game_patch: str | None,
         set_name: str | None,
         document_type: str | None,
+        source_type: str | None,
     ) -> list[KnowledgeChunk]:
         clauses = ["c.embedding_model=?", "c.embedding_dimension=?"]
         params: list[object] = [self._embeddings.model_name, len(query)]
@@ -104,6 +140,7 @@ class SQLiteKnowledgeRepository:
             ("d.game_patch", game_patch),
             ("d.set_name", set_name),
             ("d.document_type", document_type),
+            ("d.source_type", source_type),
         ):
             if value is not None:
                 clauses.append(f"{column}=?")
@@ -141,6 +178,7 @@ def _chunk(row: sqlite3.Row, score: float) -> KnowledgeChunk:
         language=row["language"],
         url=row["url"],
         published_at=_dt(row["published_at"]),
+        updated_at=_dt(row["updated_at"]),
         retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
         embedding_model=row["embedding_model"],
         relevance_score=score,

@@ -66,23 +66,27 @@ def create_server(
 
     if knowledge_repository is not None:
         knowledge = KnowledgeTools(knowledge_repository)
+        capability_summary = knowledge_repository.capability_summary()
 
-        @server.tool()
+        @server.tool(
+            description=(
+                "Search the limited local corpus for official patch/set facts and community "
+                "strategy guides. Community strategy is opinion, never Riot authority. Use "
+                "strategy only for a named covered comp/topic, not global-best claims or "
+                "unsupported authors. Never replace structured champion data or shop odds. "
+                "Copy the user's complete question into query; use grounded filters only. "
+                f"{capability_summary}"
+            )
+        )
         async def search_game_knowledge(
             query: str,
             top_k: int = 4,
             game_patch: str | None = None,
             set_name: str | None = None,
             document_type: str | None = None,
+            source_type: str | None = None,
         ) -> ToolResult:
-            """Search local versioned evidence for official patch notes, set overviews, and set
-            mechanics. Do not use for strategy, meta strength, compositions, items, positioning,
-            community-author recommendations, structured champion data, shop odds, exact hit or
-            pool calculations, champion abilities/traits/set membership/stats/roles, general TFT
-            descriptions, general concepts, or facts already present in GameState. Results are
-            factual evidence, not strategy conclusions. Copy the user's complete question unchanged
-            into query. Omit optional filters and top_k unless grounded in task evidence.
-            """
+            """Search the local versioned official and community knowledge corpus."""
 
             return await knowledge.search_game_knowledge(
                 "mcp-transport",
@@ -92,6 +96,7 @@ def create_server(
                     "game_patch": game_patch,
                     "set_name": set_name,
                     "document_type": document_type,
+                    "source_type": source_type,
                 },
             )
 

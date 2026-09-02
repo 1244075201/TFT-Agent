@@ -18,4 +18,7 @@ class KnowledgeRepository(Protocol):
         game_patch: str | None = None,
         set_name: str | None = None,
         document_type: str | None = None,
+        source_type: str | None = None,
     ) -> list[KnowledgeChunk]: ...
+
+    def capability_summary(self) -> str: ...

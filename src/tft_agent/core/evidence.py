@@ -17,6 +17,18 @@ def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
     registry["task.goal"] = state.goal
     if state.current_patch is not None:
         registry["agent.game_patch"] = state.current_patch
+    # Safe repository-routing vocabulary is capability evidence, not a game fact.
+    # Keeping it in the registry lets the existing argument validator authorize
+    # metadata filters without trusting model-invented free-form values.
+    registry.update(
+        {
+            "agent.filters.riot_official.source_type": "riot_official",
+            "agent.filters.community_strategy.source_type": "community_strategy",
+            "agent.filters.patch_notes.document_type": "patch_notes",
+            "agent.filters.set_overview.document_type": "set_overview",
+            "agent.filters.strategy_guide.document_type": "strategy_guide",
+        }
+    )
     for record in state.tool_history:
         prefix = f"tool.{record.tool_call.id}"
         if isinstance(record.result.data, dict):

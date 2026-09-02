@@ -22,9 +22,34 @@ def build_evidence_context(state: AgentState) -> dict[str, Any]:
         }
         for record in state.tool_history
     ]
+    structured_evidence = [
+        item for item in tool_evidence if item["tool"] != "search_game_knowledge"
+    ]
+    official_knowledge: list[dict[str, Any]] = []
+    community_strategy_evidence: list[dict[str, Any]] = []
+    for item in tool_evidence:
+        if item["tool"] != "search_game_knowledge" or not isinstance(item["data"], dict):
+            continue
+        results = item["data"].get("results")
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            if result.get("source_type") == "riot_official":
+                official_knowledge.append(result)
+            elif result.get("source_type") == "community_strategy":
+                community_strategy_evidence.append(result)
     return {
         "user_facts": user_facts,
         "tool_evidence": tool_evidence,
+        "structured_evidence": structured_evidence,
+        "official_knowledge": official_knowledge,
+        "community_strategy_evidence": community_strategy_evidence,
+        "qualitative_reasoning": {
+            "allowed": True,
+            "must_not_impersonate_current_strategy_evidence": True,
+        },
         "allowed_inference_policy": (
             "Qualitative decision reasoning is allowed when uncertainty is explicit."
         ),

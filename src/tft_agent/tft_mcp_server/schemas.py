@@ -96,6 +96,7 @@ class KnowledgeChunk(StrictModel):
     language: str
     url: str
     published_at: datetime | None = None
+    updated_at: datetime | None = None
     retrieved_at: datetime
     embedding_model: str | None = None
     relevance_score: float | None = Field(default=None, ge=-1, le=1)
@@ -114,6 +115,7 @@ class KnowledgeDocument(StrictModel):
     set_name: str | None = None
     language: str
     published_at: datetime | None = None
+    updated_at: datetime | None = None
     retrieved_at: datetime
     url: str
 

@@ -20,18 +20,18 @@ class HeadingAwareChunker:
         self._target = target_tokens
         self._overlap = overlap_tokens
 
-    def chunk(self, text: str) -> list[TextChunk]:
+    def chunk(self, text: str, document_title: str | None = None) -> list[TextChunk]:
         chunks: list[TextChunk] = []
         for heading, paragraphs in _sections(text):
             current: list[str] = []
             for paragraph in paragraphs:
                 if current and _tokens("\n\n".join([*current, paragraph])) > self._target:
-                    chunks.append(_make_chunk(heading, current))
+                    chunks.append(_make_chunk(document_title, heading, current))
                     overlap = " ".join("\n\n".join(current).split()[-self._overlap :])
                     current = [overlap] if overlap else []
                 current.append(paragraph)
             if current:
-                chunks.append(_make_chunk(heading, current))
+                chunks.append(_make_chunk(document_title, heading, current))
         return chunks
 
 
@@ -56,9 +56,12 @@ def _sections(text: str) -> list[tuple[str | None, list[str]]]:
     return sections
 
 
-def _make_chunk(heading: str | None, paragraphs: list[str]) -> TextChunk:
+def _make_chunk(
+    document_title: str | None, heading: str | None, paragraphs: list[str]
+) -> TextChunk:
     text = "\n\n".join(paragraphs)
-    embedding_text = f"{heading}\n{text}" if heading else text
+    context = [value for value in (document_title, heading) if value]
+    embedding_text = "\n".join([*context, text])
     return TextChunk(heading=heading, text=embedding_text, token_count=_tokens(embedding_text))
 
 

@@ -1,0 +1,62 @@
+[
+  {
+    "document_id": "bunnymuffins-18.1-blossom-ahri",
+    "title": "BunnyMuffins Set 18 Patch 18.1 — Blossom Ahri",
+    "content": "# Blossom Ahri\n\n## Authority and scope\n\nThis is a community strategy snapshot, not a Riot rule. The source labels the page for Set 18 Patch 18.1 and describes Blossom Ahri as a Fast 8/9 line.\n\n## Conditions\n\nThe guide favors this line from an early Blossom board with usable ability-power items and enough economy to reach the late game. It warns that the composition loses value when it cannot progress beyond level 8.\n\n## Stage 4 roll decision\n\nThe guide recommends rolling at Stage 4-2 to improve Ahri and Sett before buying luxury upgrades. When the core pair is still weak and economy is limited, it prioritizes those core upgrades over secondary two-star units.\n\n## Level transition\n\nAfter stabilizing the core board, the guide shifts toward leveling for Ashe and Gnar. It treats several lower-cost supporting units as replaceable by late-game legendary units.\n\n## Items and flexibility\n\nThe guide prefers ability-power and mana-generation items on Ahri, durable tank items on Sett, and caster utility on Ashe. These are community preferences and should not be presented as mandatory Riot facts.",
+    "source": "BunnyMuffins",
+    "source_type": "community_strategy",
+    "document_type": "strategy_guide",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": null,
+    "updated_at": null,
+    "retrieved_at": "2026-09-01T17:30:00Z",
+    "url": "https://bunnymuffins.lol/meta/"
+  },
+  {
+    "document_id": "bunnymuffins-18.1-vanguard-aphelios",
+    "title": "BunnyMuffins Set 18 Patch 18.1 — Vanguard Aphelios",
+    "content": "# Vanguard Aphelios\n\n## Authority and scope\n\nThis is a community strategy snapshot from a page explicitly labeled Set 18 Patch 18.1. It is an operating opinion, not an official game rule.\n\n## Conditions\n\nThe guide presents Aphelios as an attack-damage fallback when the opener is strong but the game cannot comfortably reach a higher-cost Fast 9 board. It expects a high-tempo start and enough item components to support both damage and frontline.\n\n## Stage 4 roll decision\n\nFor a heavily losing game, the guide suggests preparing to roll at Stage 4-1 before contested frontline units disappear. During Stage 4 it prioritizes Aphelios, Sentinel, and Brambleback upgrades, while allowing the frontline shell to change when Sentinel is heavily contested.\n\n## Level transition\n\nThe guide advises against leveling to 9 before Aphelios and Brambleback are upgraded. Only after that stabilization does it recommend adding late-game units such as Alune or Lux.\n\n## Items and flexibility\n\nThe page lists several acceptable attack-damage items for Aphelios and emphasizes that an early tempo item can be preferable to waiting for a perfect build. This remains community advice rather than an exact requirement.",
+    "source": "BunnyMuffins",
+    "source_type": "community_strategy",
+    "document_type": "strategy_guide",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": null,
+    "updated_at": null,
+    "retrieved_at": "2026-09-01T17:30:00Z",
+    "url": "https://bunnymuffins.lol/meta/"
+  },
+  {
+    "document_id": "bunnymuffins-18.1-draven-fast9",
+    "title": "BunnyMuffins Set 18 Patch 18.1 — Draven Fast 9",
+    "content": "# Draven Fast 9\n\n## Authority and scope\n\nThis is a community strategy snapshot from the Set 18 Patch 18.1 meta page. It describes a risky high-economy line and is not Riot-official guidance.\n\n## Conditions\n\nThe guide requires a strong economy, a stable opener, and suitable Draven items. It discourages choosing the line from a loss-streak position because the board depends on reaching level 9 and upgrading expensive units.\n\n## Pivot condition\n\nIf the streak breaks or economy falls short during the middle game, the guide suggests leaving this line for a lower-cost option such as Vanguard Aphelios rather than spending heavily at level 8.\n\n## Level and roll plan\n\nThe guide prefers preserving resources through Stage 4, reaching level 9 during Stage 5, and then rolling for the final board. If survival pressure is severe and economy is unusually strong, it allows an earlier level timing, but frames that as an exception.\n\n## Upgrade priority\n\nAfter reaching level 9, the guide prioritizes the main carry and primary tank upgrades before luxury legendary units. This ordering is a community recommendation, not a structured game fact.",
+    "source": "BunnyMuffins",
+    "source_type": "community_strategy",
+    "document_type": "strategy_guide",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": null,
+    "updated_at": null,
+    "retrieved_at": "2026-09-01T17:30:00Z",
+    "url": "https://bunnymuffins.lol/meta/"
+  },
+  {
+    "document_id": "emblemcomp-set18-launch-meta",
+    "title": "EmblemComp Set 18 — Reading a Brand-New Meta",
+    "content": "# Reading the Set 18 launch meta\n\n## Authority and freshness\n\nThis community article was updated when Enchanted Wilds launched with Patch 18.1. It explicitly argues that the launch meta was not yet settled and that naming one universally best composition would overstate the available evidence.\n\n## Choosing a line\n\nThe article recommends combining the starting augment, item drops, and lobby scouting instead of forcing a single published board. It also recommends maintaining a pivot when the primary target is contested or unavailable.\n\n## Interpreting rankings\n\nThe article distinguishes stable official mechanics from early community placement data. It directs readers to live statistical rankings for changing standings and treats its own launch guidance as a decision framework rather than a permanent tier list.\n\n## Source disagreement\n\nA tier-list source may rank specific compositions while this article cautions that early rankings are provisional. The two views should be attributed separately rather than merged into a single certain claim.",
+    "source": "EmblemComp.gg",
+    "source_type": "community_strategy",
+    "document_type": "strategy_guide",
+    "game_patch": "18.1",
+    "set_name": "Enchanted Wilds",
+    "language": "en",
+    "published_at": "2026-02-13T00:00:00Z",
+    "updated_at": "2026-08-26T00:00:00Z",
+    "retrieved_at": "2026-09-01T17:30:00Z",
+    "url": "https://emblemcomp.gg/guides/set-18-meta-compositions"
+  }
+]

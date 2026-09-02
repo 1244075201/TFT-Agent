@@ -1,5 +1,7 @@
 """Application-level checks that are intentionally separate from field validation."""
 
+import re
+
 from tft_agent.core.schemas import GameState
 
 
@@ -15,3 +17,16 @@ class GameStateValidator:
         if game_state.user_question is None:
             fields.append("user_question")
         return fields
+
+    def missing_strategy_context(self, game_state: GameState) -> list[str]:
+        """Require identity facts when a strategy question only points at an unnamed comp."""
+
+        question = game_state.user_question or ""
+        unnamed_reference = re.search(
+            r"(?:这套|这个|当前)(?:阵容|体系)|\bthis (?:comp|composition)\b",
+            question,
+            re.IGNORECASE,
+        )
+        if unnamed_reference and game_state.comp_name is None and not game_state.core_units:
+            return ["comp_name or core_units"]
+        return []

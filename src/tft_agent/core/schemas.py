@@ -54,6 +54,8 @@ class GameState(StrictModel):
     shop: list[UnitState] = Field(default_factory=list)
     target_champion: str | None = None
     target_cost: int | None = Field(default=None, ge=1, le=5)
+    comp_name: str | None = None
+    core_units: list[str] = Field(default_factory=list)
     user_question: str | None = None
 
 

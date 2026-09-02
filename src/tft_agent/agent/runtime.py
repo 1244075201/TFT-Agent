@@ -8,6 +8,7 @@ from jsonschema import validate
 
 from tft_agent.agent.state import AgentState
 from tft_agent.agent.tool_arguments import ToolArgumentValidator, construct_argument_claims
+from tft_agent.agent.validator import GameStateValidator
 from tft_agent.core.evidence import build_evidence_registry
 from tft_agent.core.schemas import (
     AgentAction,
@@ -42,6 +43,10 @@ class AgentRuntime:
 
         try:
             state.trace.game_state_snapshot = state.game_state.model_dump(mode="json")
+            missing_strategy = GameStateValidator().missing_strategy_context(state.game_state)
+            if missing_strategy:
+                state.missing_context = missing_strategy
+                return self._finish(state, AgentStatus.WAITING_FOR_CONTEXT)
             tools = await self._mcp_client.list_tools()
             state.trace.available_tool_names = [tool.name for tool in tools]
             while state.step_count < state.max_steps:
@@ -211,13 +216,22 @@ class AgentRuntime:
     ) -> FinalResponse:
         assert response is not None
         used_tools = list(dict.fromkeys(record.tool_call.name for record in state.tool_history))
-        sources = list(
-            dict.fromkeys(
-                result.metadata.source
-                for result in state.observations
-                if result.metadata.source is not None
-            )
-        )
+        sources: list[str] = []
+        for result in state.observations:
+            if result.metadata.source is not None:
+                sources.append(result.metadata.source)
+            if not isinstance(result.data, dict):
+                continue
+            chunks = result.data.get("results")
+            if not isinstance(chunks, list):
+                continue
+            for chunk in chunks:
+                if not isinstance(chunk, dict):
+                    continue
+                title, url = chunk.get("title"), chunk.get("url")
+                if isinstance(title, str) and isinstance(url, str):
+                    sources.append(f"{title} — {url}")
+        sources = list(dict.fromkeys(sources))
         enriched = response.model_copy(update={"used_tools": used_tools, "sources": sources})
         state.trace.final_used_tools = used_tools
         state.trace.final_sources = sources

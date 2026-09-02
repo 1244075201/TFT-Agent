@@ -26,7 +26,7 @@ async def ingest(path: Path, database: Path, settings: Settings) -> tuple[int, i
     chunker = HeadingAwareChunker()
     total = 0
     for document in documents:
-        chunks = chunker.chunk(document.content)
+        chunks = chunker.chunk(document.content, document.title)
         vectors = await asyncio.to_thread(
             embeddings.embed_documents, [chunk.text for chunk in chunks]
         )
@@ -47,6 +47,7 @@ async def ingest(path: Path, database: Path, settings: Settings) -> tuple[int, i
                 language=document.language,
                 url=document.url,
                 published_at=document.published_at,
+                updated_at=document.updated_at,
                 retrieved_at=document.retrieved_at,
                 relevance_score=None,
                 embedding=vector,

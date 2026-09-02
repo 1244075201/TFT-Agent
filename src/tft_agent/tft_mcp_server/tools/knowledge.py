@@ -18,10 +18,13 @@ class KnowledgeTools:
         patch = _optional_string(arguments, "game_patch")
         set_name = _optional_string(arguments, "set_name")
         document_type = _optional_string(arguments, "document_type")
+        source_type = _optional_string(arguments, "source_type")
         limit = arguments.get("top_k", 4)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 8:
             raise ValueError("top_k must be an integer between 1 and 8")
-        chunks = await self._repository.search(query, limit, patch, set_name, document_type)
+        chunks = await self._repository.search(
+            query, limit, patch, set_name, document_type, source_type
+        )
         if not chunks:
             return ToolResult(
                 tool_call_id=call_id,

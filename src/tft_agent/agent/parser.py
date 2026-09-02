@@ -14,7 +14,7 @@ class GameStateParser:
         return GameState.model_validate(payload)
 
     def parse_text(self, text: str) -> GameState:
-        """Extract only the small set of explicit V0.2 facts from Chinese input."""
+        """Extract only explicitly stated match and strategy-context facts."""
 
         values: dict[str, Any] = {"user_question": text}
         patterns = {
@@ -31,4 +31,26 @@ class GameStateParser:
         champion = re.search(r"(?:想找|找|目标是)\s*([A-Za-z][A-Za-z0-9' -]{1,30})", text)
         if champion:
             values["target_champion"] = champion.group(1).strip()
+        comp = re.search(
+            r"(?:正在玩|玩的是|阵容(?:是|叫))\s*[【「]?([^】」,，。；;]{2,40}?)(?:阵容)?"
+            r"(?=[,，。；;]|$)",
+            text,
+            re.IGNORECASE,
+        )
+        if comp:
+            comp_name = comp.group(1).strip()
+            if comp_name.casefold() not in {"这套", "这个", "当前", "这套阵容", "这个阵容"}:
+                values["comp_name"] = comp_name
+        core = re.search(
+            r"(?:核心(?:牌|单位)\s*(?:是|有|：|:)?|核心\s*(?:是|有|：|:))"
+            r"\s*([^,，。；;]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if core:
+            values["core_units"] = [
+                unit.strip()
+                for unit in re.split(r"[、/]|\s+(?:and|和)\s+", core.group(1))
+                if unit.strip()
+            ]
         return GameState.model_validate(values)

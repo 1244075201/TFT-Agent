@@ -65,6 +65,13 @@ MIGRATIONS = [
     CREATE INDEX idx_knowledge_documents_patch ON knowledge_documents(game_patch);
     CREATE INDEX idx_knowledge_documents_set ON knowledge_documents(set_name);
     """,
+    """
+    ALTER TABLE knowledge_documents ADD COLUMN updated_at TEXT;
+    CREATE INDEX idx_knowledge_documents_source_type
+        ON knowledge_documents(source_type);
+    CREATE INDEX idx_knowledge_documents_document_type
+        ON knowledge_documents(document_type);
+    """,
 ]
 
 
