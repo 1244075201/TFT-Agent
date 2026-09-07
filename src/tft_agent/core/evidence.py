@@ -62,10 +62,20 @@ def build_evidence_alias_registry(state: AgentState) -> EvidenceAliasRegistry:
     """Assign short, current-task aliases to citeable evidence paths."""
 
     registry = build_evidence_registry(state)
+    knowledge_call_ids = {
+        record.tool_call.id
+        for record in state.tool_history
+        if record.tool_call.name == "search_game_knowledge"
+    }
     refs: list[str] = [
         path
         for path in registry
-        if path.startswith("game_state.") or (path.startswith("tool.") and ".data." in path)
+        if path.startswith("game_state.")
+        or (
+            path.startswith("tool.")
+            and ".data." in path
+            and path.split(".", 2)[1] not in knowledge_call_ids
+        )
     ]
     for record in state.tool_history:
         if record.tool_call.name != "search_game_knowledge" or not isinstance(
@@ -85,12 +95,14 @@ def build_evidence_alias_registry(state: AgentState) -> EvidenceAliasRegistry:
 
 def _register_scalars(
     registry: EvidenceRegistry,
-    value: dict[str, Any],
+    value: Any,
     prefix: str,
 ) -> None:
-    for key, item in value.items():
-        path = f"{prefix}.{key}"
-        if isinstance(item, dict):
-            _register_scalars(registry, item, path)
-        elif isinstance(item, (int, float, str)) and not isinstance(item, bool):
-            registry[path] = item
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _register_scalars(registry, item, f"{prefix}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _register_scalars(registry, item, f"{prefix}.{index}")
+    elif isinstance(value, (int, float, str)) and not isinstance(value, bool):
+        registry[prefix] = value

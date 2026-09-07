@@ -30,3 +30,11 @@ class GameStateValidator:
         if unnamed_reference and game_state.comp_name is None and not game_state.core_units:
             return ["comp_name or core_units"]
         return []
+
+    def rich_state_issues(self, game_state: GameState) -> list[str]:
+        """Report only deterministic contradictions in an otherwise valid state."""
+
+        issues: list[str] = []
+        if game_state.level is not None and len(game_state.board) > game_state.level:
+            issues.append("board unit count exceeds level")
+        return issues

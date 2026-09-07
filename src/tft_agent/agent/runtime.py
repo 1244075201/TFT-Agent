@@ -1,6 +1,7 @@
 """Bounded agent loop and decision routing."""
 
 import logging
+import re
 from time import perf_counter
 
 from jsonschema import ValidationError as JSONSchemaValidationError
@@ -14,6 +15,7 @@ from tft_agent.core.schemas import (
     AgentAction,
     AgentStatus,
     FinalResponse,
+    GameState,
     NumericClaimStatus,
     ToolCall,
     ToolCallRecord,
@@ -47,7 +49,9 @@ class AgentRuntime:
             if missing_strategy:
                 state.missing_context = missing_strategy
                 return self._finish(state, AgentStatus.WAITING_FOR_CONTEXT)
-            tools = await self._mcp_client.list_tools()
+            tools = self._scope_tools_for_state(
+                await self._mcp_client.list_tools(), state.game_state
+            )
             state.trace.available_tool_names = [tool.name for tool in tools]
             while state.step_count < state.max_steps:
                 decision = await self._llm_client.generate(state, tools)
@@ -85,6 +89,49 @@ class AgentRuntime:
             logger.exception("Agent runtime failed")
             state.failure_reason = str(exc)
             return self._finish(state, AgentStatus.FAILED)
+
+    @staticmethod
+    def _scope_tools_for_state(
+        tools: list[MCPToolDefinition], game_state: GameState
+    ) -> list[MCPToolDefinition]:
+        """Hide champion identity lookup when owned-unit names are only decision context."""
+
+        question = game_state.user_question or ""
+        has_owned_units = bool(game_state.board or game_state.bench)
+        champion_fact_request = re.search(
+            r"(?:champion\s*id|英雄\s*id|几费|费用|cost|结构化|同步数据|查询.*(?:英雄|champion))",
+            question,
+            re.IGNORECASE,
+        )
+        roll_or_odds_request = re.search(
+            r"(?:要不要|是否|该不该)?.{0,4}(?:D|搜|抽|roll)|概率|几率|odds|chance",
+            question,
+            re.IGNORECASE,
+        )
+        knowledge_request = bool(
+            game_state.comp_name
+            or re.search(r"版本|补丁|机制|攻略|guide|patch|strategy", question, re.IGNORECASE)
+        )
+        unknown_author_request = bool(re.search(r"作者|author", question, re.IGNORECASE))
+        named_comp_strategy = bool(
+            game_state.comp_name
+            and game_state.target_cost is None
+            and game_state.target_champion is None
+        )
+        scoped: list[MCPToolDefinition] = []
+        for tool in tools:
+            if tool.name == "get_champion_info" and has_owned_units and not champion_fact_request:
+                continue
+            if tool.name == "get_shop_odds" and (
+                (has_owned_units and not roll_or_odds_request) or named_comp_strategy
+            ):
+                continue
+            if tool.name == "search_game_knowledge" and (
+                (has_owned_units and not knowledge_request) or unknown_author_request
+            ):
+                continue
+            scoped.append(tool)
+        return scoped
 
     @staticmethod
     def _ground_tool_arguments(state: AgentState, tool_call: ToolCall) -> ToolCall | None:

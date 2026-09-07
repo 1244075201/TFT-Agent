@@ -332,7 +332,11 @@ class DeepSeekLLMClient:
                     correction.final_response.strategy_recommendation is not None
                 )
                 return correction
-        if correction.action == AgentAction.REQUEST_CONTEXT and not state.tool_history:
+        if (
+            correction.action == AgentAction.REQUEST_CONTEXT
+            and not state.tool_history
+            and not _request_context_is_premature(correction, state)
+        ):
             trace.correction_succeeded = True
             return correction
         trace.fallback_used = True
@@ -516,6 +520,25 @@ def _request_context_is_premature(decision: AgentDecision, state: AgentState) ->
     """Reject context requests after successful evidence or for an already present field."""
 
     if any(record.result.success for record in state.tool_history):
+        return True
+    game_state = state.game_state
+    has_rich_context = bool(
+        game_state.board
+        or game_state.bench
+        or game_state.item_components
+        or game_state.completed_items
+        or game_state.augments
+        or game_state.streak is not None
+    )
+    question = game_state.user_question or state.goal
+    roll_pattern = r"(?:要不要|是否|该不该)?.{0,4}(?:D|搜|抽|roll)"
+    roll_question = bool(re.search(roll_pattern, question, re.I))
+    missing_required_roll_fact = game_state.level is None or (
+        game_state.target_cost is None and game_state.target_champion is None
+    )
+    # Rich facts are sufficient for a bounded summary or qualitative assessment. Optional
+    # positioning, trait, patch, or opponent detail should become a caveat, not a blocker.
+    if has_rich_context and not (roll_question and missing_required_roll_fact):
         return True
     registry = build_evidence_registry(state)
     available_fields = {path.rsplit(".", 1)[-1].casefold() for path in registry}

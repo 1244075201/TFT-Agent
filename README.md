@@ -37,6 +37,23 @@ final response, or request missing context. Tool calls pass only through `MCPCli
 their normalized results and timings are recorded in `AgentState`. The runtime stops on a
 terminal decision, an unrecoverable client failure, or the configured step limit.
 
+## V0.4 Rich Decision Context
+
+`GameState` accepts explicit board and bench units (including star level and held items),
+classified component and completed-item inventory, augments, and a small win/loss streak fact.
+The deterministic text parser only fills these fields from labeled input; it does not infer board
+strength or actions such as whether to roll. Nested facts are individually registered and aliased
+for final-answer provenance.
+
+Rich state does not add a tool. Production remains limited to `get_champion_info`,
+`get_shop_odds`, and `search_game_knowledge`; listing several owned units must not cause one
+champion lookup per unit. The V0.4 provider-backed board evaluation is opt-in:
+
+```bash
+uv run tft-eval-board-v04
+uv run tft-eval-board-v04 --case no_explosion_001
+```
+
 ## Real LLM Agent Loop
 
 ```text

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -28,6 +28,33 @@ class UnitState(StrictModel):
     star_level: int = Field(default=1, ge=1, le=4)
     items: list[str] = Field(default_factory=list)
 
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("unit name cannot be blank")
+        return value
+
+    @field_validator("items")
+    @classmethod
+    def validate_items(cls, value: list[str]) -> list[str]:
+        return _clean_fact_names(value, "unit item", maximum=3)
+
+
+class StreakType(StrEnum):
+    """Explicit current streak direction."""
+
+    WIN = "win"
+    LOSS = "loss"
+
+
+class StreakState(StrictModel):
+    """Small factual streak context; no prediction or board-strength judgment."""
+
+    type: StreakType
+    length: int = Field(ge=1, le=20)
+
 
 class TraitState(StrictModel):
     """An observed trait count; breakpoint may be omitted when unknown."""
@@ -46,17 +73,36 @@ class GameState(StrictModel):
     xp: int | None = Field(default=None, ge=0)
     gold: int | None = Field(default=None, ge=0)
     hp: int | None = Field(default=None, ge=0, le=100)
-    board: list[UnitState] = Field(default_factory=list)
-    bench: list[UnitState] = Field(default_factory=list)
+    board: list[UnitState] = Field(default_factory=list, max_length=11)
+    bench: list[UnitState] = Field(default_factory=list, max_length=9)
+    # Kept for backward-compatible structured callers; new V0.4 input should classify
+    # inventory into item_components and completed_items when that fact is explicit.
     items: list[str] = Field(default_factory=list)
+    item_components: list[str] = Field(default_factory=list)
+    completed_items: list[str] = Field(default_factory=list)
     traits: list[TraitState] = Field(default_factory=list)
     augments: list[str] = Field(default_factory=list)
+    streak: StreakState | None = None
     shop: list[UnitState] = Field(default_factory=list)
     target_champion: str | None = None
     target_cost: int | None = Field(default=None, ge=1, le=5)
     comp_name: str | None = None
     core_units: list[str] = Field(default_factory=list)
     user_question: str | None = None
+
+    @field_validator("items", "item_components", "completed_items", "augments", "core_units")
+    @classmethod
+    def validate_named_facts(cls, value: list[str]) -> list[str]:
+        return _clean_fact_names(value, "fact")
+
+
+def _clean_fact_names(value: list[str], label: str, maximum: int | None = None) -> list[str]:
+    if maximum is not None and len(value) > maximum:
+        raise ValueError(f"{label} list cannot contain more than {maximum} entries")
+    cleaned = [item.strip() for item in value]
+    if any(not item for item in cleaned):
+        raise ValueError(f"{label} names cannot be blank")
+    return cleaned
 
 
 class ToolErrorResolution(StrEnum):

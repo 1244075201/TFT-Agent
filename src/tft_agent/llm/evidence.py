@@ -95,7 +95,7 @@ def _alias_description(ref: str, state: AgentState) -> dict[str, Any]:
 def evidence_field_paths(context: dict[str, Any]) -> list[str]:
     """Return source-qualified field paths for lightweight observability."""
 
-    paths = [f"user_facts.{field}" for field in context["user_facts"]]
+    paths = _leaf_paths(context["user_facts"], "user_facts")
     for index, observation in enumerate(context["tool_evidence"]):
         tool = observation["tool"]
         data = observation["data"]
@@ -104,14 +104,16 @@ def evidence_field_paths(context: dict[str, Any]) -> list[str]:
     return paths
 
 
-def _leaf_paths(value: dict[str, Any], prefix: str) -> list[str]:
+def _leaf_paths(value: Any, prefix: str) -> list[str]:
     paths: list[str] = []
-    for key, item in value.items():
-        path = f"{prefix}.{key}"
-        if isinstance(item, dict):
-            paths.extend(_leaf_paths(item, path))
-        else:
-            paths.append(path)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            paths.extend(_leaf_paths(item, f"{prefix}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            paths.extend(_leaf_paths(item, f"{prefix}.{index}"))
+    else:
+        paths.append(prefix)
     return paths
 
 

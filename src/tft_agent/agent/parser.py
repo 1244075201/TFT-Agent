@@ -4,7 +4,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from tft_agent.core.schemas import GameState
+from tft_agent.core.schemas import GameState, StreakState, StreakType, UnitState
 
 
 class GameStateParser:
@@ -59,4 +59,78 @@ class GameStateParser:
                 for unit in re.split(r"[、/]|\s+(?:and|和)\s+", core.group(1))
                 if unit.strip()
             ]
+        unit_labels: dict[str, tuple[str, ...]] = {
+            "board": ("棋盘", "场上", "board"),
+            "bench": ("备战席", "替补席", "bench"),
+        }
+        for field, labels in unit_labels.items():
+            segment = _labeled_segment(text, labels)
+            if segment:
+                values[field] = _parse_units(segment)
+        fact_labels: dict[str, tuple[str, ...]] = {
+            "item_components": ("散件", "装备散件", "components", "item components"),
+            "completed_items": ("成装", "完整装备", "completed items"),
+            "augments": ("强化符文", "强化", "augments"),
+        }
+        for field, labels in fact_labels.items():
+            segment = _labeled_segment(text, labels)
+            if segment:
+                values[field] = _parse_names(segment)
+        streak = re.search(r"(?:当前)?\s*(\d{1,2})\s*(连胜|连败)", text, re.IGNORECASE)
+        if streak:
+            values["streak"] = StreakState(
+                type=StreakType.WIN if streak.group(2) == "连胜" else StreakType.LOSS,
+                length=int(streak.group(1)),
+            )
+        else:
+            streak = re.search(r"\b(\d{1,2})[- ]game\s+(win|loss)\s+streak\b", text, re.I)
+            if streak:
+                values["streak"] = StreakState(
+                    type=StreakType(streak.group(2).lower()), length=int(streak.group(1))
+                )
         return GameState.model_validate(values)
+
+
+def _labeled_segment(text: str, labels: tuple[str, ...]) -> str | None:
+    label = "|".join(re.escape(item) for item in labels)
+    match = re.search(
+        rf"(?:^|[；;。\n])\s*(?:{label})\s*(?:是|有|为|：|:)?\s*([^；;。\n]+)",
+        text,
+        re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
+
+
+def _parse_names(segment: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[、,，/]", segment) if item.strip()]
+
+
+def _parse_units(segment: str) -> list[UnitState]:
+    units: list[UnitState] = []
+    for raw in _split_outside_brackets(segment):
+        item_match = re.search(r"[（(]([^()（）]+)[）)]", raw)
+        items = _parse_names(item_match.group(1)) if item_match else []
+        without_items = re.sub(r"[（(][^()（）]+[）)]", "", raw).strip()
+        star_match = re.search(r"(?:\s|^)([1-4])\s*(?:星|stars?\b)", without_items, re.I)
+        star_level = int(star_match.group(1)) if star_match else 1
+        name = re.sub(r"(?:\s|^)[1-4]\s*(?:星|stars?\b)", "", without_items, flags=re.I)
+        name = name.strip()
+        if name:
+            units.append(UnitState(name=name, star_level=star_level, items=items))
+    return units
+
+
+def _split_outside_brackets(value: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(value):
+        if char in "(（":
+            depth += 1
+        elif char in ")）":
+            depth = max(0, depth - 1)
+        elif char in ",，、/" and depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
