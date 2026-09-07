@@ -34,6 +34,35 @@ def test_game_state_accepts_v02_decision_facts() -> None:
     assert state.target_champion == "Alistar"
 
 
+def test_game_state_accepts_classified_v04_facts() -> None:
+    state = GameState.model_validate(
+        {
+            "board": [{"name": "Ahri", "star_level": 2, "items": ["Blue Buff"]}],
+            "bench": [{"name": "Sett"}],
+            "item_components": ["Tear"],
+            "completed_items": ["Warmog's Armor"],
+            "augments": ["Jeweled Lotus"],
+            "streak": {"type": "win", "length": 4},
+        }
+    )
+
+    assert state.board[0].items == ["Blue Buff"]
+    assert state.streak is not None and state.streak.length == 4
+
+
+def test_unit_rejects_more_than_three_held_items() -> None:
+    with pytest.raises(ValidationError):
+        UnitState(name="Ahri", items=["a", "b", "c", "d"])
+
+
+def test_rich_state_validator_flags_impossible_board_count_for_level() -> None:
+    state = GameState(level=1, board=[UnitState(name="A"), UnitState(name="B")])
+
+    from tft_agent.agent.validator import GameStateValidator
+
+    assert GameStateValidator().rich_state_issues(state) == ["board unit count exceeds level"]
+
+
 def test_shop_odds_record_requires_a_probability_distribution() -> None:
     payload = {
         "level": 7,

@@ -1,5 +1,6 @@
 from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.validator import GameStateValidator
+from tft_agent.core.schemas import StreakType
 
 
 def test_parser_extracts_explicit_v02_decision_facts() -> None:
@@ -76,3 +77,33 @@ def test_parser_extracts_named_comp_before_guide_reference() -> None:
 
     assert state.comp_name == "Blossom Ahri"
     assert GameStateValidator().missing_strategy_context(state) == []
+
+
+def test_parser_extracts_rich_board_state_without_strategy_judgments() -> None:
+    state = GameStateParser().parse_text(
+        "我现在4-2，7级，35血，40金币；棋盘：Ahri 2星（蓝霸符、珠光护手），Sett 1星；"
+        "备战席：Garen 2星；散件：大剑、拳套；成装：狂徒铠甲；"
+        "强化符文：珠光莲花、纷乱头脑；当前3连败。该怎么调整？"
+    )
+
+    assert [(unit.name, unit.star_level) for unit in state.board] == [
+        ("Ahri", 2),
+        ("Sett", 1),
+    ]
+    assert state.board[0].items == ["蓝霸符", "珠光护手"]
+    assert state.bench[0].name == "Garen"
+    assert state.item_components == ["大剑", "拳套"]
+    assert state.completed_items == ["狂徒铠甲"]
+    assert state.augments == ["珠光莲花", "纷乱头脑"]
+    assert state.streak is not None
+    assert state.streak.type == StreakType.LOSS
+    assert state.streak.length == 3
+    assert not hasattr(state, "board_is_weak")
+    assert not hasattr(state, "should_roll")
+
+
+def test_parser_keeps_unlabeled_unit_mentions_out_of_board_state() -> None:
+    state = GameStateParser().parse_text("Ahri和Sett都很重要，我该找谁？")
+
+    assert state.board == []
+    assert state.bench == []

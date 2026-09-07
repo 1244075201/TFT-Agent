@@ -1,0 +1,54 @@
+{
+  "dataset_version": "v0.4.0",
+  "policy": "Board-aware GameState facts must parse deterministically and enrich decisions without tool explosion.",
+  "cases": [
+    {
+      "id": "board_001", "slice": "board_units",
+      "prompt": "我7级35血40金币；棋盘：Ahri 2星（蓝霸符、珠光护手），Sett 1星；备战席：Garen 2星。现在怎么调整？",
+      "expected_state": {"level": 7, "hp": 35, "gold": 40, "board.0.name": "Ahri", "board.0.star_level": 2, "board.0.items.0": "蓝霸符", "bench.0.name": "Garen"},
+      "expected_tools": [], "allowed_tools": [], "expected_status": "completed"
+    },
+    {
+      "id": "board_002", "slice": "unit_quality",
+      "prompt": "棋盘：Ahri 1星，Sett 2星；备战席：Ahri 1星、Garen 1星。只根据这些事实给出定性建议。",
+      "expected_state": {"board.0.name": "Ahri", "board.1.star_level": 2, "bench.0.name": "Ahri"},
+      "expected_tools": [], "allowed_tools": [], "expected_status": "completed"
+    },
+    {
+      "id": "items_001", "slice": "item_inventory",
+      "prompt": "散件：大剑、拳套、眼泪；成装：狂徒铠甲；棋盘：Ahri 2星（蓝霸符）。我现在的装备事实是什么？",
+      "expected_state": {"item_components.0": "大剑", "item_components.2": "眼泪", "completed_items.0": "狂徒铠甲", "board.0.items.0": "蓝霸符"},
+      "expected_tools": [], "allowed_tools": [], "expected_status": "completed"
+    },
+    {
+      "id": "augment_001", "slice": "augments",
+      "prompt": "强化符文：珠光莲花、纷乱头脑；棋盘：Ahri 2星，Sett 2星。请结合已知事实定性分析。",
+      "expected_state": {"augments.0": "珠光莲花", "augments.1": "纷乱头脑"},
+      "expected_tools": [], "allowed_tools": [], "expected_status": "completed"
+    },
+    {
+      "id": "streak_001", "slice": "small_streak_context",
+      "prompt": "我7级28血30金币，当前4连败；棋盘：Ahri 1星，Sett 1星；目标是4费卡，我该D吗？",
+      "expected_state": {"streak.type": "loss", "streak.length": 4, "target_cost": 4},
+      "expected_tools": ["get_shop_odds"], "allowed_tools": ["get_shop_odds"], "expected_status": "completed"
+    },
+    {
+      "id": "streak_002", "slice": "small_streak_context",
+      "prompt": "我8级70血50金币，当前5连胜；棋盘：Ahri 2星（蓝霸符）；目标是5费卡，要不要继续搜？",
+      "expected_state": {"streak.type": "win", "streak.length": 5, "level": 8, "target_cost": 5},
+      "expected_tools": ["get_shop_odds"], "allowed_tools": ["get_shop_odds"], "expected_status": "completed"
+    },
+    {
+      "id": "no_explosion_001", "slice": "champion_tool_explosion",
+      "prompt": "棋盘：Ahri 2星，Sett 2星，Garen 2星，Lux 1星；备战席：Ezreal 1星，Riven 1星。概括我的棋盘和备战席。",
+      "expected_state": {"board.3.name": "Lux", "bench.1.name": "Riven"},
+      "expected_tools": [], "allowed_tools": [], "expected_status": "completed"
+    },
+    {
+      "id": "no_inference_001", "slice": "facts_only",
+      "prompt": "棋盘：Ahri 1星；备战席：Ahri 1星；散件：大剑。请复述状态，不要判断强弱。",
+      "expected_state": {"board.0.star_level": 1, "bench.0.star_level": 1, "item_components.0": "大剑"},
+      "expected_tools": [], "allowed_tools": [], "expected_status": "completed"
+    }
+  ]
+}

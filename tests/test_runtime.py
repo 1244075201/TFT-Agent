@@ -112,6 +112,61 @@ def make_state(max_steps: int = 3) -> AgentState:
     return AgentState(game_state=GameState(), goal="decide", max_steps=max_steps)
 
 
+def test_rich_state_scopes_out_unrequested_champion_lookup() -> None:
+    tools = [
+        MCPToolDefinition(name="get_champion_info", description="identity", input_schema={}),
+        MCPToolDefinition(name="get_shop_odds", description="odds", input_schema={}),
+        MCPToolDefinition(name="search_game_knowledge", description="knowledge", input_schema={}),
+    ]
+    game_state = GameState.model_validate(
+        {
+            "board": [{"name": "Ahri", "star_level": 2}],
+            "user_question": "根据我的棋盘给出定性调整建议",
+        }
+    )
+
+    scoped = AgentRuntime._scope_tools_for_state(tools, game_state)
+
+    assert scoped == []
+
+
+def test_rich_state_keeps_champion_lookup_for_explicit_cost_request() -> None:
+    tools = [MCPToolDefinition(name="get_champion_info", description="identity", input_schema={})]
+    game_state = GameState.model_validate(
+        {
+            "board": [{"name": "Ahri"}],
+            "user_question": "请查询 Ahri 是几费英雄",
+        }
+    )
+
+    assert AgentRuntime._scope_tools_for_state(tools, game_state) == tools
+
+
+def test_named_comp_strategy_scopes_out_unneeded_shop_odds() -> None:
+    tools = [
+        MCPToolDefinition(name="get_shop_odds", description="odds", input_schema={}),
+        MCPToolDefinition(name="search_game_knowledge", description="knowledge", input_schema={}),
+    ]
+    game_state = GameState(
+        level=7,
+        comp_name="Vanguard Aphelios",
+        user_question="这套阵容现在该搜还是上人口？",
+    )
+
+    assert [tool.name for tool in AgentRuntime._scope_tools_for_state(tools, game_state)] == [
+        "search_game_knowledge"
+    ]
+
+
+def test_unknown_community_author_question_scopes_out_knowledge_search() -> None:
+    tools = [
+        MCPToolDefinition(name="search_game_knowledge", description="knowledge", input_schema={})
+    ]
+    game_state = GameState(user_question="某社区作者 FictionalCoach 推荐什么阵容？")
+
+    assert AgentRuntime._scope_tools_for_state(tools, game_state) == []
+
+
 @pytest.mark.asyncio
 async def test_runtime_routes_tool_then_final() -> None:
     tool_call = ToolCall(id="1", name="lookup", arguments={})

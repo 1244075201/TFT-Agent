@@ -416,6 +416,41 @@ async def test_premature_request_for_resolved_context_is_repaired() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rich_state_optional_context_request_is_repaired_to_final() -> None:
+    agent_state = AgentState(
+        game_state=GameState.model_validate(
+            {"board": [{"name": "Ahri", "star_level": 2}], "augments": ["Jeweled Lotus"]}
+        ),
+        goal="Give a bounded qualitative assessment from these facts.",
+    )
+    create = AsyncMock(
+        side_effect=[
+            response(
+                content=json.dumps(
+                    {"action": "request_context", "missing_context": ["positioning details"]}
+                )
+            ),
+            response(
+                content=json.dumps(
+                    {
+                        "supported_facts": [],
+                        "qualitative_recommendation": (
+                            "Use the supplied board and augment facts while keeping "
+                            "the caveats explicit."
+                        ),
+                    }
+                )
+            ),
+        ]
+    )
+
+    decision = await client_with_create(create).generate(agent_state, [])
+
+    assert decision.action == AgentAction.FINAL
+    assert agent_state.trace.finalization.premature_request_context_count == 1
+
+
+@pytest.mark.asyncio
 async def test_missing_corpus_evidence_is_not_treated_as_user_context() -> None:
     create = AsyncMock(
         side_effect=[
