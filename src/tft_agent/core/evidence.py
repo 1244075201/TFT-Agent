@@ -18,6 +18,13 @@ def build_evidence_registry(state: AgentState) -> EvidenceRegistry:
     registry["task.goal"] = state.goal
     if state.current_patch is not None:
         registry["agent.game_patch"] = state.current_patch
+    for observation in state.vision_observations:
+        observed = observation.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude={"observation_id", "image_source", "uncertain_fields", "not_visible_fields"},
+        )
+        _register_scalars(registry, observed, f"vision.{observation.observation_id}")
     # Safe repository-routing vocabulary is capability evidence, not a game fact.
     # Keeping it in the registry lets the existing argument validator authorize
     # metadata filters without trusting model-invented free-form values.
@@ -71,6 +78,7 @@ def build_evidence_alias_registry(state: AgentState) -> EvidenceAliasRegistry:
         path
         for path in registry
         if path.startswith("game_state.")
+        or path.startswith("vision.")
         or (
             path.startswith("tool.")
             and ".data." in path

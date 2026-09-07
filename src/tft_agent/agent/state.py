@@ -11,6 +11,7 @@ from tft_agent.core.schemas import (
     ToolCallRecord,
     ToolResult,
 )
+from tft_agent.vision.schemas import StateConflict, VisionObservation, VisionTrace
 
 
 class AgentMessage(StrictModel):
@@ -35,6 +36,9 @@ class AgentState(StrictModel):
     final_response: FinalResponse | None = None
     missing_context: list[str] = Field(default_factory=list)
     failure_reason: str | None = None
+    vision_observations: list[VisionObservation] = Field(default_factory=list)
+    state_conflicts: list[StateConflict] = Field(default_factory=list)
+    vision_traces: list[VisionTrace] = Field(default_factory=list)
     trace: AgentTrace = Field(default_factory=AgentTrace)
 
     @model_validator(mode="after")

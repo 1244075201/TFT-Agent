@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_steps: int = Field(default=8, ge=1, le=100)
     model: str = Field(default="deepseek-v4-flash", min_length=1)
+    vision_model: str = Field(default="deepseek-v4-flash-vision-exp", min_length=1)
+    vision_detail: Literal["low", "high", "original", "auto"] = "high"
     thinking_mode: Literal["enabled", "disabled"] = "disabled"
     llm_max_retries: int = Field(default=2, ge=0, le=5)
     database_path: Path = Path("data/tft.sqlite3")

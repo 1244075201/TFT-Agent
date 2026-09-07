@@ -54,6 +54,29 @@ uv run tft-eval-board-v04
 uv run tft-eval-board-v04 --case no_explosion_001
 ```
 
+## V0.5 Vision Observation Layer
+
+V0.5 adds an observation-only image boundary. `DeepSeekVisionClient` reads a user-provided local
+PNG/JPEG, sends it as an in-memory base64 data URL to the independently configured
+`deepseek-v4-flash-vision-exp` model, validates a strict `VisionObservation`, and then applies an
+explicit-user-first merge into `GameState`. Vision never produces a strategy decision.
+
+Unseen fields remain null and are listed in `not_visible_fields`; ambiguous fields are listed in
+`uncertain_fields`. User/vision disagreements become `StateConflict` records rather than silent
+overwrites. Vision evidence has separate `vision.<observation_id>.*` paths and can ground factual
+claims or tool arguments, but it cannot by itself authorize a current-meta strategy assertion.
+Trace records hashes and dimensions, never image base64.
+
+```bash
+uv run tft-vision-extract screenshot.png
+uv run tft-eval-vision-v05 --detail high
+uv run tft-eval-vision-e2e-v05
+```
+
+The checked-in V0.5 image set is a controlled synthetic baseline, not a claimed real-game accuracy
+benchmark. Real screenshots require separate human-authored ground truth before reporting real-game
+visual accuracy.
+
 ## Real LLM Agent Loop
 
 ```text

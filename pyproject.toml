@@ -13,6 +13,7 @@ dependencies = [
   "openai>=1.99,<3",
   "pydantic>=2.12,<3",
   "pydantic-settings>=2.2,<3",
+  "pillow>=11,<13",
   "sentence-transformers>=5,<6",
 ]
 
@@ -33,6 +34,9 @@ tft-ingest-knowledge = "tft_agent.ingestion.ingest_knowledge:main"
 tft-eval-retrieval-v03 = "tft_agent.evals.retrieval_v03_runner:main"
 tft-eval-strategy-v031 = "tft_agent.evals.strategy_decision_v031_runner:main"
 tft-eval-board-v04 = "tft_agent.evals.board_decision_v04_runner:main"
+tft-vision-extract = "tft_agent.app.vision_extract:main"
+tft-eval-vision-v05 = "tft_agent.evals.vision_extraction_v05_runner:main"
+tft-eval-vision-e2e-v05 = "tft_agent.evals.vision_e2e_v05_runner:main"
 tft-smoke-rag-mcp = "tft_agent.evals.rag_mcp_smoke:main"
 tft-eval-tool-selection = "tft_agent.evals.tool_selection_runner:main"
 tft-eval-outcome-safety = "tft_agent.evals.outcome_safety_runner:main"

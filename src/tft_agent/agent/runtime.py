@@ -49,6 +49,10 @@ class AgentRuntime:
             if missing_strategy:
                 state.missing_context = missing_strategy
                 return self._finish(state, AgentStatus.WAITING_FOR_CONTEXT)
+            material_conflicts = GameStateValidator().material_conflicts(state)
+            if material_conflicts:
+                state.missing_context = material_conflicts
+                return self._finish(state, AgentStatus.WAITING_FOR_CONTEXT)
             tools = self._scope_tools_for_state(
                 await self._mcp_client.list_tools(), state.game_state
             )

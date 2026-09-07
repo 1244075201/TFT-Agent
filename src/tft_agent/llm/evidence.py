@@ -47,6 +47,11 @@ def build_evidence_context(state: AgentState) -> dict[str, Any]:
     aliases = build_evidence_alias_registry(state)
     return {
         "user_facts": user_facts,
+        "vision_facts": [
+            observation.model_dump(mode="json", exclude_none=True)
+            for observation in state.vision_observations
+        ],
+        "state_conflicts": [conflict.model_dump(mode="json") for conflict in state.state_conflicts],
         "tool_evidence": tool_evidence,
         "structured_evidence": structured_evidence,
         "official_knowledge": official_knowledge,
