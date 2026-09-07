@@ -18,6 +18,7 @@ from tft_agent.core.schemas import (
     ToolResult,
 )
 from tft_agent.mcp_client.client import MCPToolDefinition
+from tft_agent.vision.schemas import StateConflict
 
 
 class FakeLLMClient:
@@ -245,6 +246,29 @@ async def test_runtime_routes_request_context() -> None:
 
     assert result.status == AgentStatus.WAITING_FOR_CONTEXT
     assert result.missing_context == ["current shop"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_requests_material_user_vision_conflict_before_llm() -> None:
+    state = AgentState(
+        game_state=GameState(level=8, target_cost=4, user_question="我该D还是升人口？"),
+        goal="我该D还是升人口？",
+        state_conflicts=[
+            StateConflict(
+                field="level",
+                user_value=8,
+                vision_value=7,
+                sources=["user", "vision:obs-1"],
+            )
+        ],
+    )
+    llm = FakeLLMClient([])
+
+    result = await AgentRuntime(llm, FakeMCPClient()).run(state)
+
+    assert result.status == AgentStatus.WAITING_FOR_CONTEXT
+    assert "conflicting level" in result.missing_context[0]
+    assert llm.calls == 0
 
 
 @pytest.mark.asyncio
