@@ -129,6 +129,7 @@ async def test_stdio_list_and_unique_not_found_and_ambiguous(tmp_path: Path) -> 
         assert [tool.name for tool in tools] == [
             "get_champion_info",
             "get_shop_odds",
+            "search_datatft_comps",
             "search_game_knowledge",
         ]
         assert set(tools[0].input_schema["properties"]) == {

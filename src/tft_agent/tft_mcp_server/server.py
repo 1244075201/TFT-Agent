@@ -64,6 +64,18 @@ def create_server(
             arguments={"level": level, "game_patch": game_patch},
         )
 
+    @server.tool()
+    async def search_datatft_comps(
+        game_patch: str, query: str | None = None, limit: int = 5
+    ) -> ToolResult:
+        """Search synchronized DataTFT CN composition statistics for one exact game patch.
+        Use for meta strength, composition, item, augment, and level-plan questions. Returned
+        numeric values and recommendations must cite the record source URL and retrieval time.
+        Never use a mismatched patch or invent a missing statistic.
+        """
+
+        return await tools.search_datatft_comps("mcp-transport", query, game_patch, limit)
+
     if knowledge_repository is not None:
         knowledge = KnowledgeTools(knowledge_repository)
         capability_summary = knowledge_repository.capability_summary()

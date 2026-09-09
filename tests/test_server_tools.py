@@ -7,6 +7,8 @@ from tft_agent.core.schemas import ToolErrorResolution
 from tft_agent.tft_mcp_server.schemas import (
     ChampionImage,
     ChampionRecord,
+    CompStatsRecord,
+    DataSnapshotMetadata,
     ItemInfo,
     ShopOddsRecord,
     TraitInfo,
@@ -62,6 +64,22 @@ class FakeGameDataRepository:
 
     async def get_shop_odds(self, level: int, game_patch: str | None) -> ShopOddsRecord | None:
         return self.shop_odds
+
+    async def replace_datatft_snapshot(
+        self,
+        metadata: DataSnapshotMetadata,
+        records: Sequence[CompStatsRecord],
+        raw_payload: str,
+    ) -> None:
+        raise AssertionError("not used")
+
+    async def search_comps(
+        self, query: str | None, game_patch: str, limit: int = 5
+    ) -> list[CompStatsRecord]:
+        return []
+
+    async def latest_datatft_snapshot(self) -> tuple[DataSnapshotMetadata, int] | None:
+        return None
 
 
 @pytest.mark.asyncio

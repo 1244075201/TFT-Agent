@@ -45,6 +45,6 @@ def test_v04_prompt_exposes_rich_facts_and_forbids_champion_tool_explosion() -> 
 
     prompt = build_system_prompt([], build_evidence_context(state))
 
-    assert SYSTEM_PROMPT_VERSION == "v0.4.0"
+    assert SYSTEM_PROMPT_VERSION == "v0.6.0"
     assert '"board":[{"name":"Ahri","star_level":2,"items":["蓝霸符"]}' in prompt
     assert "do not call\nget_champion_info once per board or bench unit" in prompt

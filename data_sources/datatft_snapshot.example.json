@@ -1,0 +1,19 @@
+{
+  "game_patch": "18.1d",
+  "sample_scope": "CN Server; replace with the scope shown by DataTFT",
+  "comps": [
+    {
+      "id": "example-comp",
+      "name": "示例阵容（请替换）",
+      "tier": "S",
+      "average_place": 4.0,
+      "play_rate": "10%",
+      "top4_rate": "50%",
+      "win_rate": "12%",
+      "core_units": [],
+      "recommended_items": [],
+      "augments": [],
+      "level_plan": []
+    }
+  ]
+}

@@ -15,6 +15,8 @@ dependencies = [
   "pydantic-settings>=2.2,<3",
   "pillow>=11,<13",
   "sentence-transformers>=5,<6",
+  "mss>=10,<11",
+  "PySide6>=6.8,<7",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +29,9 @@ dev = [
 
 [project.scripts]
 tft-agent = "tft_agent.app.main:main"
+tft-agent-desktop = "tft_agent.desktop.main:main"
+tft-sync-datatft = "tft_agent.ingestion.sync_datatft:main"
+tft-sync-static-data = "tft_agent.ingestion.sync_static_data:main"
 tft-mcp-server = "tft_agent.tft_mcp_server.server:main"
 tft-sync-game-data = "tft_agent.ingestion.sync_game_data:main"
 tft-sync-shop-odds = "tft_agent.ingestion.sync_shop_odds:main"

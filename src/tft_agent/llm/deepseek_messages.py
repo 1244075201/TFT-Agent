@@ -43,8 +43,13 @@ def build_provider_messages(
             "role": "system",
             "content": build_system_prompt(available_tools, evidence),
         },
-        {"role": "user", "content": user_content},
     ]
+    messages.extend(
+        {"role": item.role, "content": item.content}
+        for item in state.messages[-20:]
+        if item.role in {"user", "assistant"}
+    )
+    messages.append({"role": "user", "content": user_content})
     for record in state.tool_history:
         call = record.tool_call
         messages.append(

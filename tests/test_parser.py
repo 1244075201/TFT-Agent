@@ -107,3 +107,14 @@ def test_parser_keeps_unlabeled_unit_mentions_out_of_board_state() -> None:
 
     assert state.board == []
     assert state.bench == []
+
+
+def test_parser_extracts_augment_choices_emblem_and_spatula() -> None:
+    state = GameStateParser().parse_text(
+        "我现在有征战之路 宝宝学院 和 蔓延之根 这三个海克斯怎么选？"
+        "另外有一个铲子和裁决转。"
+    )
+
+    assert state.augment_choices == ["征战之路", "宝宝学院", "蔓延之根"]
+    assert state.special_components == ["铲子"]
+    assert state.emblems == ["裁决转"]

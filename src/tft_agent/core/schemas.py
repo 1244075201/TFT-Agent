@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -82,15 +83,23 @@ class GameState(StrictModel):
     completed_items: list[str] = Field(default_factory=list)
     traits: list[TraitState] = Field(default_factory=list)
     augments: list[str] = Field(default_factory=list)
+    augment_choices: list[str] = Field(default_factory=list, max_length=3)
+    emblems: list[str] = Field(default_factory=list)
+    special_components: list[str] = Field(default_factory=list)
+    active_comp_id: str | None = None
     streak: StreakState | None = None
     shop: list[UnitState] = Field(default_factory=list)
     target_champion: str | None = None
     target_cost: int | None = Field(default=None, ge=1, le=5)
     comp_name: str | None = None
     core_units: list[str] = Field(default_factory=list)
+    notes: str | None = None
     user_question: str | None = None
 
-    @field_validator("items", "item_components", "completed_items", "augments", "core_units")
+    @field_validator(
+        "items", "item_components", "completed_items", "augments", "augment_choices",
+        "emblems", "special_components", "core_units"
+    )
     @classmethod
     def validate_named_facts(cls, value: list[str]) -> list[str]:
         return _clean_fact_names(value, "fact")
@@ -188,6 +197,84 @@ class FinalResponse(StrictModel):
     used_tools: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     strategy_recommendation: StrategyRecommendation | None = None
+
+
+class AdviceEvidence(StrictModel):
+    """A user-visible evidence link for one advice option."""
+
+    label: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    game_patch: str | None = None
+    retrieved_at: datetime | None = None
+
+
+class AdviceOption(StrictModel):
+    """One choice presented to the player; never an automated game action."""
+
+    title: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    conditions: list[str] = Field(default_factory=list)
+    expected_benefit: str = Field(min_length=1)
+    risk: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[AdviceEvidence] = Field(default_factory=list)
+
+
+class EvidenceFact(StrictModel):
+    """One compact, versioned fact allowed into a decision prompt."""
+
+    evidence_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    details: dict[str, Any] = Field(default_factory=dict)
+    source: str = Field(min_length=1)
+    source_url: str = Field(min_length=1)
+    game_patch: str
+    retrieved_at: datetime
+
+
+class EvidenceBundle(StrictModel):
+    game_patch: str
+    facts: list[EvidenceFact] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    qualitative_only: bool = False
+
+
+class DecisionRequest(StrictModel):
+    question: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    game_state: GameState
+    evidence: EvidenceBundle
+
+
+class ChatMode(StrEnum):
+    COMPLIANT = "compliant"
+    EXPERIMENTAL_LIVE = "experimental_live"
+
+
+class ChatRequest(StrictModel):
+    """UI-neutral input accepted by the reusable application service."""
+
+    text: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    mode: ChatMode = ChatMode.COMPLIANT
+    screenshot_path: Path | None = None
+    confirmed_game_state: GameState | None = None
+    product_mode: Literal["comp_browser", "match_guidance"] = "match_guidance"
+
+
+class ChatEvent(StrictModel):
+    """Streaming progress or terminal payload from AgentService."""
+
+    type: Literal["status", "observation", "answer", "error", "cancelled"]
+    message: str = ""
+    game_state: GameState | None = None
+    response: FinalResponse | None = None
+    advice_options: list[AdviceOption] = Field(default_factory=list)
+    retrieval_plan: dict[str, Any] | None = None
+    context_gaps: list[str] = Field(default_factory=list)
+    llm_call_count: int = Field(default=0, ge=0)
 
 
 class AgentStatus(StrEnum):

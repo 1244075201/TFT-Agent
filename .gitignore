@@ -11,6 +11,7 @@ __pycache__/
 venv/
 # Local environment and secret overrides. Keep the sanitized template tracked.
 .env
+data/chat_history.json
 .env.*
 !.env.example
 eval_results/*.json

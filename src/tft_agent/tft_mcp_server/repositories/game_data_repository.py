@@ -4,7 +4,14 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from tft_agent.tft_mcp_server.schemas import ChampionRecord, ItemInfo, ShopOddsRecord, TraitInfo
+from tft_agent.tft_mcp_server.schemas import (
+    ChampionRecord,
+    CompStatsRecord,
+    DataSnapshotMetadata,
+    ItemInfo,
+    ShopOddsRecord,
+    TraitInfo,
+)
 
 
 class GameDataRepository(Protocol):
@@ -31,3 +38,15 @@ class GameDataRepository(Protocol):
     async def replace_shop_odds(self, records: Sequence[ShopOddsRecord]) -> None: ...
 
     async def get_shop_odds(self, level: int, game_patch: str | None) -> ShopOddsRecord | None: ...
+
+    async def replace_datatft_snapshot(
+        self, metadata: DataSnapshotMetadata, records: Sequence[CompStatsRecord], raw_payload: str
+    ) -> None: ...
+
+    async def search_comps(
+        self, query: str | None, game_patch: str, limit: int = 5
+    ) -> list[CompStatsRecord]: ...
+
+    async def latest_datatft_snapshot(
+        self,
+    ) -> tuple[DataSnapshotMetadata, int] | None: ...

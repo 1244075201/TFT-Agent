@@ -1,6 +1,7 @@
 """Typed records returned by TFT repositories and tools."""
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import Field, model_validator
@@ -135,3 +136,55 @@ class KnowledgeChunkRecord(KnowledgeChunk):
     embedding_model_revision: str | None = None
     embedding_dimension: int = Field(gt=0)
     embedded_at: datetime
+
+
+class SnapshotStatus(StrEnum):
+    VALID = "valid"
+    STALE = "stale"
+    INVALID = "invalid"
+
+
+class DataSnapshotMetadata(StrictModel):
+    snapshot_id: str
+    source: str = "datatft"
+    server: str
+    game_patch: str
+    sample_scope: str | None = None
+    source_url: str
+    retrieved_at: datetime
+    content_hash: str
+    etag: str | None = None
+    status: SnapshotStatus = SnapshotStatus.VALID
+
+
+class CompStatsRecord(StrictModel):
+    """Normalized DataTFT composition performance and guide fields."""
+
+    comp_id: str
+    name: str
+    tier: str | None = None
+    average_place: float | None = Field(default=None, ge=1, le=8)
+    play_rate: float | None = Field(default=None, ge=0, le=1)
+    top4_rate: float | None = Field(default=None, ge=0, le=1)
+    win_rate: float | None = Field(default=None, ge=0, le=1)
+    core_units: list[str] = Field(default_factory=list)
+    recommended_items: list[str] = Field(default_factory=list)
+    augments: list[str] = Field(default_factory=list)
+    level_plan: list[str] = Field(default_factory=list)
+    snapshot: DataSnapshotMetadata
+
+
+class StaticEntityRecord(StrictModel):
+    """Chinese static definition from Riot or CommunityDragon."""
+
+    entity_id: str
+    entity_type: str
+    name: str
+    description: str = ""
+    traits: list[str] = Field(default_factory=list)
+    components: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    data_version: str
+    source: str
+    source_url: str
+    retrieved_at: datetime

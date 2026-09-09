@@ -136,6 +136,41 @@ class GameDataTools:
             ),
         )
 
+    async def search_datatft_comps(
+        self, call_id: str, query: str | None, game_patch: str, limit: int = 5
+    ) -> ToolResult:
+        """Return only synchronized DataTFT records for the exact requested patch."""
+
+        if not 1 <= limit <= 8:
+            raise ValueError("limit must be between 1 and 8")
+        records = await self._repository.search_comps(query, game_patch, limit)
+        if not records:
+            return ToolResult(
+                tool_call_id=call_id,
+                success=False,
+                metadata=ToolMetadata(game_patch=game_patch, source="datatft"),
+                error=ToolError(
+                    code="DATATFT_DATA_NOT_FOUND",
+                    message=(
+                        "No DataTFT snapshot matches the requested patch; "
+                        "do not infer meta statistics."
+                    ),
+                ),
+            )
+        newest = records[0].snapshot
+        return ToolResult(
+            tool_call_id=call_id,
+            success=True,
+            data={"results": [record.model_dump(mode="json") for record in records]},
+            metadata=ToolMetadata(
+                game_patch=newest.game_patch,
+                source="datatft",
+                source_type="community_statistics",
+                retrieved_at=newest.retrieved_at,
+                freshness=newest.status.value,
+            ),
+        )
+
 
 def _required_string(arguments: dict[str, Any], key: str) -> str:
     value = arguments.get(key)

@@ -77,6 +77,51 @@ MIGRATIONS = [
     ALTER TABLE knowledge_documents ADD COLUMN strategy_entities TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE knowledge_documents ADD COLUMN strategy_topics TEXT NOT NULL DEFAULT '[]';
     """,
+    """
+    CREATE TABLE datatft_snapshots (
+        snapshot_id TEXT PRIMARY KEY, source TEXT NOT NULL, server TEXT NOT NULL,
+        game_patch TEXT NOT NULL, sample_scope TEXT, source_url TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, etag TEXT,
+        status TEXT NOT NULL, raw_payload TEXT NOT NULL
+    );
+    CREATE TABLE datatft_comps (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, name TEXT NOT NULL,
+        tier TEXT, average_place REAL, play_rate REAL, top4_rate REAL, win_rate REAL,
+        core_units TEXT NOT NULL, recommended_items TEXT NOT NULL, augments TEXT NOT NULL,
+        level_plan TEXT NOT NULL, PRIMARY KEY(snapshot_id, comp_id),
+        FOREIGN KEY(snapshot_id) REFERENCES datatft_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_datatft_snapshot_patch ON datatft_snapshots(game_patch, retrieved_at);
+    CREATE INDEX idx_datatft_comp_name ON datatft_comps(name COLLATE NOCASE);
+    """,
+    """
+    CREATE TABLE static_entities (
+        data_version TEXT NOT NULL, entity_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+        name TEXT NOT NULL, description TEXT NOT NULL, traits TEXT NOT NULL,
+        components TEXT NOT NULL, tags TEXT NOT NULL, source TEXT NOT NULL,
+        source_url TEXT NOT NULL, retrieved_at TEXT NOT NULL,
+        PRIMARY KEY(data_version, entity_id)
+    );
+    CREATE INDEX idx_static_entities_name
+        ON static_entities(name COLLATE NOCASE, data_version);
+    CREATE INDEX idx_static_entities_type
+        ON static_entities(entity_type, data_version);
+    CREATE TABLE session_game_states (
+        session_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, field_sources_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE session_messages (
+        message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_session_messages_session
+        ON session_messages(session_id, message_id);
+    """,
 ]
 
 

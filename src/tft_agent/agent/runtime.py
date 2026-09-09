@@ -116,6 +116,15 @@ class AgentRuntime:
             game_state.comp_name
             or re.search(r"版本|补丁|机制|攻略|guide|patch|strategy", question, re.IGNORECASE)
         )
+        datatft_request = bool(
+            re.search(
+                r"阵容|装备|强化|海克斯|运营|上分|推荐|强度|胜率|排名|meta|comp|item|augment",
+                question,
+                re.IGNORECASE,
+            )
+            or game_state.comp_name
+            or game_state.board
+        )
         unknown_author_request = bool(re.search(r"作者|author", question, re.IGNORECASE))
         named_comp_strategy = bool(
             game_state.comp_name
@@ -124,6 +133,8 @@ class AgentRuntime:
         )
         scoped: list[MCPToolDefinition] = []
         for tool in tools:
+            if tool.name == "search_datatft_comps" and not datatft_request:
+                continue
             if tool.name == "get_champion_info" and has_owned_units and not champion_fact_request:
                 continue
             if tool.name == "get_shop_odds" and (
@@ -144,6 +155,16 @@ class AgentRuntime:
         trace = state.trace.tool_argument_validation
         trace.proposed_tool_calls += 1
         registry = build_evidence_registry(state)
+        if tool_call.name == "search_datatft_comps":
+            arguments = dict(tool_call.arguments)
+            arguments["game_patch"] = state.current_patch or state.game_state.patch
+            if state.game_state.comp_name:
+                arguments["query"] = state.game_state.comp_name
+            elif arguments.get("query"):
+                arguments.pop("query")
+            if arguments.get("limit") == 5:
+                arguments.pop("limit")
+            tool_call = tool_call.model_copy(update={"arguments": arguments})
         if tool_call.name == "search_game_knowledge":
             # The retrieval contract requires the complete original question. Canonicalize this
             # one transport argument deterministically instead of trusting provider paraphrases.
@@ -324,6 +345,11 @@ class AgentRuntime:
                 title, url = chunk.get("title"), chunk.get("url")
                 if isinstance(title, str) and isinstance(url, str):
                     sources.append(f"{title} — {url}")
+                snapshot = chunk.get("snapshot")
+                if isinstance(snapshot, dict):
+                    source_url = snapshot.get("source_url")
+                    if isinstance(source_url, str):
+                        sources.append(f"DataTFT {snapshot.get('game_patch', '')} — {source_url}")
         sources = list(dict.fromkeys(sources))
         enriched = response.model_copy(update={"used_tools": used_tools, "sources": sources})
         state.trace.final_used_tools = used_tools

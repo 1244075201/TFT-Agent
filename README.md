@@ -6,36 +6,47 @@ TFT Decision Agent is a maintainable, version-aware foundation for turning a use
 Teamfight Tactics game state into an evidence-backed decision. The current implementation
 includes two narrow structured-data tools plus one version-filtered knowledge retrieval tool.
 
+The project now also includes an optional Chinese Windows desktop client, versioned DataTFT
+composition snapshots, and an opt-in screenshot monitor. The monitor captures pixels only: it does
+not read game memory, inject into the client, inspect opponents, or automate input.
+
+> Riot's published TFT policy does not permit dynamic real-time recommendations based on current
+> game state. The desktop application therefore starts in compliant mode. Experimental monitoring
+> is local-only, disabled by default, and must not be publicly distributed without Riot approval.
+
 ## Architecture
 
 ```text
-User
-  -> Parser
-  -> GameState
-  -> Agent Runtime
-  -> LLM
-  -> Function Call
-  -> MCP Client
-  -> TFT MCP Server
-  -> Tool
-  -> Repository
-  -> SQLite / future Vector DB
-  -> ToolResult
-  -> Agent Runtime
-  -> LLM
-  -> Final Response
+User Query + GameState
+  -> deterministic Query / State Understanding
+  -> deterministic Retrieval Plan
+  -> structured SQLite / text retrieval
+  -> deterministic factual answer, or Context Builder -> ONE DeepSeek call -> answer
 ```
+
+`AgentService` is the single composition root for CLI and desktop. Explicit factual browsing uses
+the local SQLite path without an LLM. Any recommendation, comparison, choice, explanation, or
+judgment retrieves evidence first and makes exactly one DeepSeek answer call. The production path
+does not use model-selected tools, an agent loop, or an LLM repair call. Local parsing and output
+normalization may recover fenced JSON, partial envelopes, aliases, and useful plain text.
+
+The legacy `AgentRuntime` and stdio MCP integration remain available for compatibility and
+regression tests, but neither is referenced by the production CLI or desktop answer path.
 
 Function calling is the model-facing representation of an action. MCP is the transport
 and discovery boundary used to execute that action; they are related, but not identical.
 
-## Runtime Workflow
+## V0.5 Runtime Workflow
 
-The parser produces factual `GameState`. `AgentRuntime` owns the bounded loop and asks an
-LLM client for one typed `AgentDecision` per step. A decision may call one tool, return a
-final response, or request missing context. Tool calls pass only through `MCPClient`, and
-their normalized results and timings are recorded in `AgentState`. The runtime stops on a
-terminal decision, an unrecoverable client failure, or the configured step limit.
+The parser, editor, and optional vision layer produce factual `GameState`. Missing optional fields
+are recorded as context gaps and do not block conditional guidance. Retrieval is patch-filtered and
+uses normalized DataTFT, static entity, shop-odds, and knowledge-document tables. Existing embedding
+code is retained for legacy experiments, but the main retrieval path does not instantiate it or
+depend on a vector database.
+
+The desktop separates “阵容推荐” (current-version browsing and one-page comp summaries) from
+“对局指导” (decisions based on the player's current state). The first is factual; deciding what to
+play from items, augments, or units belongs to match guidance and therefore uses the one-call path.
 
 ## V0.4 Rich Decision Context
 
@@ -76,6 +87,35 @@ uv run tft-eval-vision-e2e-v05
 The checked-in V0.5 image set is a controlled synthetic baseline, not a claimed real-game accuracy
 benchmark. Real screenshots require separate human-authored ground truth before reporting real-game
 visual accuracy.
+
+## Desktop Application and DataTFT Snapshots
+
+Install dependencies and start the Chinese desktop chat UI:
+
+```bash
+uv sync --all-extras
+uv run tft-agent-desktop
+```
+
+On Windows, after the first `uv sync --all-extras`, double-click
+`启动云顶指导Agent.cmd` in the project folder; no PowerShell command is required.
+
+The UI supports persistent local chat, screenshot selection, cancellation, and an explicitly gated
+experimental monitor. Chat history is stored in `data/chat_history.json`; screenshots are not kept.
+
+Runtime never scrapes DataTFT. Import a reviewed canonical JSON export (recommended):
+
+```bash
+uv run tft-sync-datatft --input data_sources/datatft_snapshot.example.json
+```
+
+Without `--input`, the synchronizer checks `robots.txt`, then uses the public frontend composition
+list and strategy requests with a configurable delay between details. It imports the real current
+tiers, core units, item IDs, and early/mid/final operation text. The current endpoints do not expose
+placement/top-four/win/play rates, so those values remain null. It does not bypass authentication,
+CAPTCHAs, rate limits, or access restrictions. A canonical snapshot contains `game_patch`, optional
+`sample_scope`, and a `comps` array with named statistics and guide fields. Every record retains its
+source URL, retrieval time, content hash, server, and exact patch.
 
 ## Real LLM Agent Loop
 
@@ -283,13 +323,13 @@ grounding or safety checks.
 
 ## Current Limitations
 
-- Three production tools; no fourth strategy-, item-, trait-, or web-search tool.
+- Four production tools; DataTFT support currently requires a compatible public payload or reviewed
+  canonical JSON export because DataTFT does not publish a stable API contract.
 - The controlled strategy corpus is deliberately small and does not cover the entire meta.
 - No live web retrieval, hybrid search, BM25, reranker, or automatic crawler.
 - No long-term memory or planning layer.
-- No vision or screenshot input.
 - No parallel tool execution.
-- One-shot CLI only; no persistent chat session or streaming UI.
+- Real-screen accuracy still requires a human-labelled CN-client screenshot benchmark.
 
 ## Agent Evaluation
 

@@ -76,6 +76,23 @@ class GameStateParser:
             segment = _labeled_segment(text, labels)
             if segment:
                 values[field] = _parse_names(segment)
+        offered = re.search(
+            r"(?:现在有|可选|三选一[:：]?)\s*(.{2,80}?)\s*"
+            r"(?:这三个|三个)?(?:海克斯|强化)(?:怎么选|选哪个|如何选)",
+            text,
+        )
+        if offered:
+            values["augment_choices"] = _parse_choice_names(offered.group(1))[:3]
+        special = [name for name in ("铲子", "金锅锅", "锅") if name in text]
+        if special:
+            values["special_components"] = list(dict.fromkeys(special))
+        emblems = []
+        for raw in re.findall(r"([\u4e00-\u9fffA-Za-z]{1,12}(?:转|纹章))", text):
+            name = re.split(r"和|及|有|拿到|一个", raw)[-1]
+            if name:
+                emblems.append(name)
+        if emblems:
+            values["emblems"] = list(dict.fromkeys(emblems))
         streak = re.search(r"(?:当前)?\s*(\d{1,2})\s*(连胜|连败)", text, re.IGNORECASE)
         if streak:
             values["streak"] = StreakState(
@@ -103,6 +120,15 @@ def _labeled_segment(text: str, labels: tuple[str, ...]) -> str | None:
 
 def _parse_names(segment: str) -> list[str]:
     return [item.strip() for item in re.split(r"[、,，/]", segment) if item.strip()]
+
+
+def _parse_choice_names(segment: str) -> list[str]:
+    cleaned = re.sub(r"^(?:我)?", "", segment.strip())
+    return [
+        item.strip()
+        for item in re.split(r"[、,，/]|和|\s+", cleaned)
+        if item.strip()
+    ]
 
 
 def _parse_units(segment: str) -> list[UnitState]:
