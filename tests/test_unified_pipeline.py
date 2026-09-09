@@ -88,9 +88,11 @@ def test_local_normalization_rejects_empty_output() -> None:
 class _FakeCompletions:
     def __init__(self) -> None:
         self.calls = 0
+        self.last_request: dict[str, Any] = {}
 
-    async def create(self, **_: Any) -> Any:
+    async def create(self, **kwargs: Any) -> Any:
         self.calls += 1
+        self.last_request = kwargs
         message = SimpleNamespace(content='{"summary":"条件式建议","options":[]}')
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
@@ -108,6 +110,10 @@ async def test_decision_client_makes_exactly_one_call() -> None:
     result = await client.decide_context(_context())
     assert result.response.recommendation == "条件式建议"
     assert provider.completions.calls == 1
+    messages = provider.completions.last_request["messages"]
+    assert "USER QUESTION\n怎么运营" in messages[1]["content"]
+    assert "STRATEGY CONDITIONS" in messages[0]["content"]
+    assert "不代表玩家已经满足" in messages[0]["content"]
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,16 @@
       "alias": "腰带",
       "entity_type": "item",
       "canonical_name": "巨人腰带"
+    },
+    {
+      "alias": "天使",
+      "entity_type": "composition",
+      "canonical_name": "森林天使"
+    },
+    {
+      "alias": "蛇女",
+      "entity_type": "composition",
+      "canonical_name": "6护卫蛇女"
     }
   ]
 }

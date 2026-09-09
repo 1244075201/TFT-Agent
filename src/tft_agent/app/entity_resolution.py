@@ -105,6 +105,7 @@ def _unambiguous_spans(
         by_term.setdefault(_normalize(candidate[2]), []).append(candidate)
     augment_context = bool(re.search(r"选哪个|三选一|海克斯|强化", query))
     filtered: list[tuple[int, dict[str, object], str, str]] = []
+    blocked_terms: list[str] = []
     for term, candidates in by_term.items():
         kinds = {str(value[1]["entity_type"]) for value in candidates}
         if len(kinds) == 1:
@@ -119,11 +120,15 @@ def _unambiguous_spans(
                     if value[1]["entity_type"] == "composition"
                     and f"玩{term}" in _normalize(query)]
             filtered.extend(comp)
+            if not comp:
+                blocked_terms.append(term)
 
     output: list[tuple[dict[str, object], str]] = []
     accepted_terms: list[str] = []
     for _, entry, term, _ in sorted(filtered, key=lambda value: value[0], reverse=True):
         normalized = _normalize(term)
+        if any(normalized in blocked and normalized != blocked for blocked in blocked_terms):
+            continue
         if any(normalized in accepted and normalized != accepted for accepted in accepted_terms):
             continue
         output.append((entry, term))

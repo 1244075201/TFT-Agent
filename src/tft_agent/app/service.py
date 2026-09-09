@@ -8,17 +8,19 @@ from time import perf_counter
 
 from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.state import AgentMessage, AgentState
-from tft_agent.app.entity_resolution import CanonicalEntityResolver
+from tft_agent.app.entity_resolution import CanonicalEntityResolver, ResolvedEntity
 from tft_agent.app.pipeline import (
     AnswerContext,
     EvidenceRecord,
     ProductMode,
     QueryKind,
+    QueryStateUnderstanding,
     RepositoryCall,
     RetrievalPlan,
     RetrievalTrace,
     RetrievedKnowledge,
-    apply_resolution,
+    StateMutationIntent,
+    apply_state_mutation,
     build_retrieval_plan,
     comp_evidence,
     context_gaps,
@@ -109,9 +111,9 @@ class AgentService:
         self._cancelled_sessions.discard(request.session_id)
         started = perf_counter()
         yield ChatEvent(type="status", message="正在解析实体并规划检索…")
-        state = request.confirmed_game_state or await self._merge_state(
-            request.session_id, GameStateParser().parse_text(request.text)
-        )
+        persisted_state = await self.load_game_state(request.session_id)
+        parsed_state = request.confirmed_game_state or GameStateParser().parse_text(request.text)
+        state = request.confirmed_game_state or _merge_game_state(persisted_state, parsed_state)
         vision: DeepSeekVisionClient | None = None
         try:
             if request.screenshot_path is not None:
@@ -127,11 +129,22 @@ class AgentService:
                 yield ChatEvent(type="observation", message="截图识别完成", game_state=state)
             entity_start = perf_counter()
             resolution = await self._resolver().resolve(request.text)
-            state = apply_resolution(state, resolution, request.text)
-            entity_end = perf_counter()
             understanding = understand_query(
                 request.text, state, ProductMode(request.product_mode), resolution
             )
+            if (
+                understanding.state_mutation == StateMutationIntent.RETAIN
+                and state.comp_name
+            ):
+                retained = await self._resolver().resolve(state.comp_name)
+                retained_comp = next((item for item in retained.entities
+                                      if item.entity_type == "composition"), None)
+                if retained_comp:
+                    understanding = understanding.model_copy(
+                        update={"target_comp": retained_comp}
+                    )
+            state = apply_state_mutation(state, understanding, request.text)
+            entity_end = perf_counter()
             plan = build_retrieval_plan(
                 understanding, state, self.settings.current_game_patch,
                 self.settings.current_set_number, self.settings.current_set_name,
@@ -140,7 +153,7 @@ class AgentService:
             knowledge, calls = await self._retrieve(request.text, plan)
             retrieval_end = perf_counter()
             history_rows = await self._repo().load_session_messages(request.session_id)
-            history = [AgentMessage(role=role, content=content) for role, content in history_rows]
+            history = _relevant_history(history_rows, understanding)
             gaps = context_gaps(state)
             context = AnswerContext(
                 question=request.text, understanding=understanding, game_state=state,
@@ -154,6 +167,8 @@ class AgentService:
                 understanding=understanding, retrieval_plan=plan, repository_calls=calls,
                 retrieved_knowledge=knowledge, knowledge_gaps=knowledge.knowledge_gaps,
                 clean_context_summary=context_summary, llm_call_count=0,
+                persisted_state_before=persisted_state, parsed_state=parsed_state,
+                game_state_after_merge=state, injected_history=history,
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -202,24 +217,26 @@ class AgentService:
         evidence: list[EvidenceRecord] = []
         gaps: list[str] = []
         calls: list[RepositoryCall] = []
-        if plan.target_comp:
+        requested_comps = ([plan.target_comp] if plan.target_comp else plan.candidate_comps)
+        for requested_comp in requested_comps:
             start = perf_counter()
             comp = await self._repo().find_comp_by_id(
-                plan.target_comp.canonical_id, plan.game_patch
+                requested_comp.canonical_id, plan.game_patch
             )
             calls.append(RepositoryCall(
                 operation="find_comp_by_id",
-                filters={"canonical_id": plan.target_comp.canonical_id,
+                filters={"canonical_id": requested_comp.canonical_id,
                          "game_patch": plan.game_patch}, result_count=int(comp is not None),
                 latency_ms=(perf_counter() - start) * 1000,
             ))
             if comp:
                 evidence.extend(item for item in comp_evidence(comp, plan.game_patch)
-                                if item.section in plan.knowledge_needs or
-                                item.section in {"core", "starting_conditions"})
+                                if item.section in plan.knowledge_needs)
             else:
-                gaps.append("target composition is absent for the exact current patch")
-        elif plan.retrieve_all_comps:
+                gaps.append(
+                    f"composition {requested_comp.display_name} is absent for the exact patch"
+                )
+        if not requested_comps and plan.retrieve_all_comps:
             start = perf_counter()
             comps = await self._repo().search_comps(None, plan.game_patch, 8)
             calls.append(RepositoryCall(
@@ -228,7 +245,7 @@ class AgentService:
             ))
             for comp in comps:
                 evidence.extend(comp_evidence(comp, plan.game_patch))
-        elif plan.candidate_selection_inputs:
+        elif not requested_comps and plan.candidate_selection_inputs:
             gaps.append("no structured item/augment-to-composition candidate index is available")
         static_entities = [item for item in plan.entities
                            if item.entity_type in {"augment", "emblem", "item", "champion"}]
@@ -252,20 +269,23 @@ class AgentService:
                 else:
                     gaps.append(f"missing usable definition for {resolved.display_name}")
         if plan.retrieve_strategy_text:
-            start = perf_counter()
-            chunks = await self._repo().search_knowledge_text(
-                question, plan.game_patch, 6,
-                plan.target_comp.display_name if plan.target_comp else None,
-            )
-            calls.append(RepositoryCall(
-                operation="search_strategy_text",
-                filters={"requested_patch": plan.game_patch,
-                         "set_name": plan.set_name,
-                         "target_comp": plan.target_comp.display_name if plan.target_comp else None,
-                         "sections": plan.knowledge_needs}, result_count=len(chunks),
-                latency_ms=(perf_counter() - start) * 1000,
-            ))
-            evidence.extend(_chunk_evidence(chunk, plan) for chunk in chunks)
+            text_targets: list[ResolvedEntity | None] = [*requested_comps] or [None]
+            for text_target in text_targets:
+                start = perf_counter()
+                target_name = text_target.display_name if text_target else None
+                chunks = await self._repo().search_knowledge_text(
+                    question, plan.game_patch, 6, target_name,
+                )
+                calls.append(RepositoryCall(
+                    operation="search_strategy_text",
+                    filters={"requested_patch": plan.game_patch,
+                             "set_name": plan.set_name, "target_comp": target_name,
+                             "sections": plan.knowledge_needs}, result_count=len(chunks),
+                    latency_ms=(perf_counter() - start) * 1000,
+                ))
+                chunk_evidence = [_chunk_evidence(chunk, plan) for chunk in chunks]
+                evidence.extend(item for item in chunk_evidence
+                                if item.section in plan.knowledge_needs)
         available = {item.section for item in evidence}
         for need in plan.knowledge_needs:
             if need not in available and need not in {"composition", "leveling"}:
@@ -274,23 +294,44 @@ class AgentService:
         return RetrievedKnowledge(evidence=list(unique.values()),
                                   knowledge_gaps=list(dict.fromkeys(gaps))), calls
 
-    async def _merge_state(self, session_id: str, current: GameState) -> GameState:
-        previous = await self.load_game_state(session_id)
-        update = {field: getattr(current, field) for field in current.model_fields_set
-                  if field != "user_question"}
-        update["user_question"] = current.user_question
-        return previous.model_copy(update=update)
-
     async def _record_answer(self, request: ChatRequest, answer: FinalResponse) -> None:
         await self._repo().append_session_messages(request.session_id, [
             ("user", request.text), ("assistant", answer.recommendation),
         ])
 
 
+def _merge_game_state(previous: GameState, current: GameState) -> GameState:
+    update = {field: getattr(current, field) for field in current.model_fields_set
+              if field != "user_question"}
+    update["user_question"] = current.user_question
+    return previous.model_copy(update=update)
+
+
+def _relevant_history(
+    rows: list[tuple[str, str]], understanding: QueryStateUnderstanding
+) -> list[AgentMessage]:
+    names = [item.display_name for item in (
+        [understanding.target_comp] if understanding.target_comp
+        else understanding.candidate_comps
+    )]
+    recent = rows[-8:]
+    selected: list[tuple[str, str]] = []
+    for index, row in enumerate(recent):
+        role, content = row
+        if role != "user" or not any(name in content for name in names):
+            continue
+        selected.append(row)
+        if index + 1 < len(recent) and recent[index + 1][0] == "assistant":
+            selected.append(recent[index + 1])
+    return [AgentMessage(role=role, content=content) for role, content in selected[-4:]]
+
+
 def _chunk_evidence(chunk: dict[str, object], plan: RetrievalPlan) -> EvidenceRecord:
     source_patch = str(chunk.get("game_patch") or "") or None
     identifier = str(chunk.get("document_id") or chunk.get("title"))
-    section = str(chunk.get("heading") or "strategy")
+    section = _strategy_chunk_section(
+        str(chunk.get("heading") or ""), str(chunk.get("text") or "")
+    )
     source = str(chunk.get("source") or "strategy knowledge")
     return EvidenceRecord(
         evidence_id=":".join((source, source_patch or "unversioned", "strategy", identifier,
@@ -302,6 +343,25 @@ def _chunk_evidence(chunk: dict[str, object], plan: RetrievalPlan) -> EvidenceRe
         relevance_score=float(str(chunk.get("relevance_score") or 0)),
         url=str(chunk.get("url") or ""),
     )
+
+
+def _strategy_chunk_section(heading: str, text: str) -> str:
+    value = f"{heading} {text}".casefold()
+    if any(term in value for term in ("opening", "condition", "开局", "条件")):
+        return "starting_conditions"
+    if any(term in value for term in ("roll", "搜牌", "d牌")):
+        return "reroll_pattern"
+    if any(term in value for term in ("item", "装备", "flexibility")):
+        return "items"
+    if any(term in value for term in ("level", "人口", "transition")):
+        return "leveling"
+    if any(term in value for term in ("early", "stage 2", "前期")):
+        return "early_game"
+    if any(term in value for term in ("late", "stage 5", "成型", "后期")):
+        return "late_game"
+    if any(term in value for term in ("mid", "stage 3", "stage 4", "中期")):
+        return "mid_game"
+    return "core"
 
 
 def _deterministic_answer(knowledge: RetrievedKnowledge, patch: str) -> FinalResponse:

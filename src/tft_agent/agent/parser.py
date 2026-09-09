@@ -18,22 +18,25 @@ class GameStateParser:
 
         values: dict[str, Any] = {"user_question": text}
         patterns = {
-            "level": r"(?:现在)?\s*(\d{1,2})\s*级",
-            "hp": r"(\d{1,3})\s*血",
-            "gold": r"(\d{1,3})\s*(?:金币|金)(?!币卡)",
+            "level": r"(?:现在)?\s*(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*(?:级|人口)",
+            "hp": r"(\d{1,3})\s*(?:滴)?血",
+            "gold": r"(\d{1,3})\s*(?:金币|金(?!币卡)|块(?:钱)?)",
             "target_cost": r"(?:目标是|找|抽|要)\s*(?:一张|一个)?\s*(\d)\s*费",
             "stage": r"(?<!\d)(\d+-\d+)(?!\d)",
         }
         for field, pattern in patterns.items():
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                values[field] = int(match.group(1)) if field != "stage" else match.group(1)
+                values[field] = (
+                    match.group(1) if field == "stage" else _parse_game_number(match.group(1))
+                )
         champion = re.search(r"(?:想找|找|目标是)\s*([A-Za-z][A-Za-z0-9' -]{1,30})", text)
         if champion:
             values["target_champion"] = champion.group(1).strip()
         comp = re.search(
-            r"(?:正在玩|玩的是|阵容(?:是|叫))\s*[【「]?([^】」,，。；;]{2,40}?)(?:阵容)?"
-            r"(?=[,，。；;]|$)",
+            r"(?:我(?:现在)?\s*|现在\s*)?(?:正在玩|玩的是|(?<!不)玩|换成|换到|"
+            r"阵容(?:是|叫))\s*[【「]?([^】」,，。；;]{2,40}?)(?:阵容)?"
+            r"(?=\s*(?:但是|不过|然后|了)?\s*[,，。；;]|\s+(?:但是|不过|然后)|$)",
             text,
             re.IGNORECASE,
         )
@@ -106,6 +109,19 @@ class GameStateParser:
                     type=StreakType(streak.group(2).lower()), length=int(streak.group(1))
                 )
         return GameState.model_validate(values)
+
+
+def _parse_game_number(value: str) -> int:
+    if value.isdigit():
+        return int(value)
+    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+    if value == "十":
+        return 10
+    if "十" in value:
+        left, right = value.split("十", 1)
+        return digits.get(left, 1) * 10 + digits.get(right, 0)
+    return digits[value]
 
 
 def _labeled_segment(text: str, labels: tuple[str, ...]) -> str | None:

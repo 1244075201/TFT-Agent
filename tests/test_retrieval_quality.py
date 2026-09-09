@@ -12,7 +12,7 @@ from tft_agent.app.entity_resolution import CanonicalEntityResolver
 from tft_agent.app.pipeline import AnswerContext, RetrievalTrace, comp_evidence
 from tft_agent.app.service import AgentService
 from tft_agent.core.config import Settings
-from tft_agent.core.schemas import ChatEvent, ChatRequest, FinalResponse
+from tft_agent.core.schemas import ChatEvent, ChatRequest, FinalResponse, GameState
 from tft_agent.llm.grounded_decision import DecisionOutcome
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
@@ -239,3 +239,135 @@ async def test_meta_lookup_is_exact_patch_and_source_identity_is_not_url(
     assert current[0].snapshot.source_url == current[1].snapshot.source_url
     identities = {item.evidence_id for group in records for item in group}
     assert len(identities) == sum(len(group) for group in records)
+
+
+@pytest.mark.asyncio
+async def test_state_aware_retrieval_regression_cases(
+    retrieval_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    _FakeDecisionClient.calls = 0
+    _FakeDecisionClient.contexts = []
+    service = AgentService(retrieval_settings)
+
+    await _ask(service, "天使怎么玩", "state-case-one")
+    first = _trace(service)
+    assert first.understanding.target_comp is not None
+    assert first.understanding.target_comp.display_name == "森林天使"
+    assert _composition_names(first) == {"森林天使"}
+    assert "USER QUESTION\n天使怎么玩" in first.clean_context_summary
+
+    await service.save_game_state(
+        "state-case-two",
+        GameState(
+            comp_name="高迅射厄斐", active_comp_id="16271",
+            emblems=["迅捷射手纹章"],
+        ),
+    )
+    await service._repo().append_session_messages(
+        "state-case-two", [("user", "黑荆棘裁决怎么玩？"), ("assistant", "旧回答")]
+    )
+    await _ask(service, "我玩蛇女 但是D了半天就两张怎么办", "state-case-two")
+    second = _trace(service)
+    assert second.game_state_after_merge.comp_name == "6护卫蛇女"
+    assert second.game_state_after_merge.emblems == ["迅捷射手纹章"]
+    assert second.understanding.state_mutation.value == "replace"
+    assert _composition_names(second) == {"6护卫蛇女"}
+    assert "高迅射厄斐" not in second.clean_context_summary
+    assert "黑荆棘裁决" not in second.clean_context_summary
+
+    await _ask(
+        service,
+        "我现在艾希95和德莱文95的牌都来了一些，我应该怎么判断最后玩哪套？",
+        "state-case-three",
+    )
+    third = _trace(service)
+    assert [item.display_name for item in third.understanding.candidate_comps] == [
+        "艾希95", "德莱文95",
+    ]
+    assert third.understanding.target_comp is None
+    assert third.game_state_after_merge.comp_name is None
+    comp_calls = [call for call in third.repository_calls
+                  if call.operation == "find_comp_by_id"]
+    assert [call.filters["canonical_id"] for call in comp_calls] == ["16244", "16241"]
+    assert _composition_names(third) == {"艾希95", "德莱文95"}
+
+    await _ask(
+        service,
+        "我现在玩艾希95，4-1八级，35块，50血，要不要D牌，还是硬扛上9。",
+        "state-case-four",
+    )
+    fourth = _trace(service)
+    state = fourth.game_state_after_merge
+    assert (state.comp_name, state.stage, state.level, state.gold, state.hp) == (
+        "艾希95", "4-1", 8, 35, 50,
+    )
+    assert "early_game" not in fourth.retrieval_plan.knowledge_needs
+    assert "starting_conditions" not in fourth.retrieval_plan.knowledge_needs
+    assert not {"early_game", "starting_conditions"} & {
+        item.section for item in fourth.retrieved_knowledge.evidence
+    }
+    assert "level_8_stabilization" in fourth.retrieval_plan.knowledge_needs
+    assert fourth.original_query in fourth.clean_context_summary
+
+    await _ask(service, "森林天使怎么玩", "state-case-five")
+    fifth = _trace(service)
+    assert "early_game" in fifth.retrieval_plan.knowledge_needs
+    early = [str(item.semantic_content) for item in fifth.retrieved_knowledge.evidence
+             if item.section == "early_game"]
+    assert early and all("连败" in value for value in early)
+    assert all("保血" not in value for value in early)
+    assert "RETRIEVED STRATEGY CONDITIONS" in fifth.clean_context_summary
+    facts_block = fifth.clean_context_summary.split("USER FACTS\n", 1)[1].split("\n\n", 1)[0]
+    assert "体系卡数量多" not in facts_block
+
+    await _ask(service, "我玩艾希95", "state-case-six")
+    await _ask(service, "我还没定阵容", "state-case-six")
+    sixth = _trace(service)
+    assert sixth.understanding.state_mutation.value == "clear"
+    assert sixth.game_state_after_merge.comp_name is None
+    assert not [call for call in sixth.repository_calls if call.operation == "find_comp_by_id"]
+    assert "艾希95" not in sixth.clean_context_summary
+
+    await service.save_game_state(
+        "state-case-seven",
+        GameState(
+            comp_name="德莱文95", active_comp_id="16241",
+            emblems=["迅捷射手纹章"], item_components=["暴风大剑"],
+        ),
+    )
+    await _ask(service, "我不玩德莱文了，换艾希95", "state-case-seven")
+    seventh = _trace(service)
+    assert seventh.understanding.state_mutation.value == "replace"
+    assert seventh.game_state_after_merge.comp_name == "艾希95"
+    assert seventh.understanding.candidate_comps == []
+    assert seventh.game_state_after_merge.emblems == ["迅捷射手纹章"]
+    assert seventh.game_state_after_merge.item_components == ["暴风大剑"]
+    assert _composition_names(seventh) == {"艾希95"}
+
+    await _ask(service, "我玩艾希95", "state-retain")
+    await _ask(service, "那现在要不要D？", "state-retain")
+    retained = _trace(service)
+    assert retained.understanding.state_mutation.value == "retain"
+    assert retained.understanding.target_comp is not None
+    assert retained.understanding.target_comp.display_name == "艾希95"
+    assert retained.injected_history
+    assert "RECENT CONVERSATION" in retained.clean_context_summary
+    assert retained.game_state_after_merge.comp_name == "艾希95"
+    assert _FakeDecisionClient.calls == 10
+
+
+def _composition_names(trace: RetrievalTrace) -> set[str]:
+    return {item.display_name for item in trace.retrieved_knowledge.evidence
+            if item.entity_type == "composition"}
+
+
+@pytest.mark.asyncio
+async def test_cross_type_short_name_ambiguity_is_unresolved(
+    retrieval_settings: Settings
+) -> None:
+    repository = SQLiteGameDataRepository(retrieval_settings.database_path.resolve())
+    await repository.initialize()
+    resolver = CanonicalEntityResolver(repository, retrieval_settings)
+    result = await resolver.resolve("世纪和解怎么玩")
+    assert not [item for item in result.entities if item.display_name == "世纪和解"]

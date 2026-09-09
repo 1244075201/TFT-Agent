@@ -23,12 +23,29 @@ class ProductMode(StrEnum):
     MATCH_GUIDANCE = "match_guidance"
 
 
+class StateMutationIntent(StrEnum):
+    RETAIN = "retain"
+    REPLACE = "replace"
+    CLEAR = "clear"
+    CANDIDATES = "candidates"
+
+
+class DecisionIntent(StrEnum):
+    FULL_GUIDE = "full_guide"
+    CURRENT_DECISION = "current_decision"
+    COMPOSITION_COMPARISON = "composition_comparison"
+    GENERAL_STRATEGY = "general_strategy"
+
+
 class QueryStateUnderstanding(StrictModel):
     kind: QueryKind
     product_mode: ProductMode
     decision_terms: list[str] = Field(default_factory=list)
     resolved_entities: list[ResolvedEntity] = Field(default_factory=list)
     target_comp: ResolvedEntity | None = None
+    candidate_comps: list[ResolvedEntity] = Field(default_factory=list)
+    state_mutation: StateMutationIntent = StateMutationIntent.RETAIN
+    decision_intent: DecisionIntent = DecisionIntent.GENERAL_STRATEGY
     browse_intent: bool = False
 
 
@@ -37,6 +54,7 @@ class RetrievalPlan(StrictModel):
     set_number: int
     set_name: str
     target_comp: ResolvedEntity | None = None
+    candidate_comps: list[ResolvedEntity] = Field(default_factory=list)
     entities: list[ResolvedEntity] = Field(default_factory=list)
     knowledge_needs: list[str] = Field(default_factory=list)
     candidate_selection_inputs: list[ResolvedEntity] = Field(default_factory=list)
@@ -82,6 +100,10 @@ class RetrievalTrace(StrictModel):
     clean_context_summary: str = ""
     llm_call_count: int = Field(default=0, ge=0)
     stage_latency_ms: dict[str, float] = Field(default_factory=dict)
+    persisted_state_before: GameState = Field(default_factory=GameState)
+    parsed_state: GameState = Field(default_factory=GameState)
+    game_state_after_merge: GameState = Field(default_factory=GameState)
+    injected_history: list[AgentMessage] = Field(default_factory=list)
 
 
 class AnswerContext(StrictModel):
@@ -95,21 +117,36 @@ class AnswerContext(StrictModel):
     knowledge_gaps: list[str] = Field(default_factory=list)
 
     def readable_summary(self) -> str:
-        sections: dict[str, list[str]] = {}
-        for item in self.evidence:
-            sections.setdefault(item.section, []).append(
-                f"{item.display_name}: {item.semantic_content} "
-                f"[来源：{item.source}｜版本：{item.source_patch or '未标注'}｜"
-                f"区块：{item.section}]"
-            )
+        facts = _user_facts(self.game_state)
+        conditions = [item for item in self.evidence if item.section == "starting_conditions"]
+        recommendations = [item for item in self.evidence
+                           if item.section != "starting_conditions"]
         blocks = [
-            "CURRENT GAME STATE\n" + self.game_state.model_dump_json(
-                exclude={"user_question", "active_comp_id", "board", "bench", "shop"},
-                exclude_none=True,
-            ),
-            *[f"{name.upper()}\n" + "\n".join(values)
-              for name, values in sections.items()],
+            "USER QUESTION\n" + self.question.strip(),
+            "USER FACTS\n" + ("\n".join(f"- {key}: {value}" for key, value in facts.items())
+                                if facts else "- No structured facts provided"),
         ]
+        if self.history:
+            lines = [f"{'User' if item.role == 'user' else 'Assistant'}: {item.content}"
+                     for item in self.history]
+            blocks.append(
+                "RECENT CONVERSATION (auxiliary only; never overrides USER FACTS)\n"
+                + "\n".join(lines)
+            )
+        if self.understanding.candidate_comps:
+            blocks.append("CANDIDATE COMPOSITIONS\n- " + "\n- ".join(
+                item.display_name for item in self.understanding.candidate_comps
+            ))
+        if conditions:
+            blocks.append(
+                "RETRIEVED STRATEGY CONDITIONS (applicability only; not user facts)\n"
+                + "\n".join(_format_evidence(item) for item in conditions)
+            )
+        if recommendations:
+            blocks.append(
+                "RETRIEVED STRATEGY RECOMMENDATIONS\n"
+                + _grouped_evidence(recommendations, self.understanding.candidate_comps)
+            )
         if self.context_gaps:
             blocks.append("CONTEXT GAPS\n- " + "\n- ".join(self.context_gaps))
         if self.knowledge_gaps:
@@ -134,11 +171,20 @@ def understand_query(
     resolution: EntityResolution | None = None,
 ) -> QueryStateUnderstanding:
     entities = resolution.entities if resolution else []
-    target = next((item for item in entities if item.entity_type == "composition"), None)
+    compositions = _ordered_compositions(text, entities)
     lowered = text.casefold()
     decision_terms = [term for term in _DECISION_TERMS if term in lowered]
     browse = mode == ProductMode.COMP_BROWSER or any(term in lowered for term in _BROWSE_TERMS)
     factual = any(term in lowered for term in _FACT_TERMS) and not decision_terms
+    mutation, target, candidates = _composition_semantics(text, compositions)
+    if len(candidates) > 1:
+        intent = DecisionIntent.COMPOSITION_COMPARISON
+    elif re.search(r"d牌|搜牌|上\s*9|升\s*9|硬扛|要不要", lowered, re.I):
+        intent = DecisionIntent.CURRENT_DECISION
+    elif any(term in lowered for term in ("怎么玩", "完整攻略", "完整运营", "攻略")):
+        intent = DecisionIntent.FULL_GUIDE
+    else:
+        intent = DecisionIntent.GENERAL_STRATEGY
     return QueryStateUnderstanding(
         kind=QueryKind.DETERMINISTIC_LOOKUP if factual or (browse and not decision_terms)
         else QueryKind.STRATEGY_DECISION,
@@ -146,6 +192,9 @@ def understand_query(
         decision_terms=decision_terms,
         resolved_entities=entities,
         target_comp=target,
+        candidate_comps=candidates,
+        state_mutation=mutation,
+        decision_intent=intent,
         browse_intent=browse,
     )
 
@@ -158,23 +207,25 @@ def build_retrieval_plan(
     set_name: str,
 ) -> RetrievalPlan:
     target = understanding.target_comp
+    candidates = understanding.candidate_comps
     other = [item for item in understanding.resolved_entities
              if item.entity_type != "composition"]
     decision = understanding.kind == QueryKind.STRATEGY_DECISION
     needs: list[str] = []
-    if target:
+    if target or candidates:
         needs.extend(["composition", "core_units", "items"])
         if decision:
-            needs.extend(["early_game", "mid_game", "late_game", "leveling"])
+            needs.extend(_strategy_sections(understanding.decision_intent, state))
     if any(item.entity_type == "emblem" for item in other):
         needs.extend(["emblem_definition", "key_traits", "composition_emblem_advice",
                       "transition", "flex", "conditional_advice"])
     if any(item.entity_type == "augment" for item in other):
         needs.extend(["augment_definition", "conditional_advice"])
-    if target is None and decision:
+    if target is None and not candidates and decision:
         needs.extend(["general_early_game", "item_flexibility", "early_slam", "transition"])
     return RetrievalPlan(
         game_patch=patch, set_number=set_number, set_name=set_name, target_comp=target,
+        candidate_comps=candidates,
         entities=other, knowledge_needs=list(dict.fromkeys(needs)),
         candidate_selection_inputs=[item for item in other
                                     if item.entity_type in {"item", "augment", "champion"}],
@@ -183,21 +234,135 @@ def build_retrieval_plan(
     )
 
 
-def apply_resolution(state: GameState, resolution: EntityResolution, question: str) -> GameState:
+def apply_state_mutation(
+    state: GameState, understanding: QueryStateUnderstanding, question: str
+) -> GameState:
     update: dict[str, Any] = {"user_question": question}
-    comp = next((item for item in resolution.entities if item.entity_type == "composition"), None)
-    if comp:
+    comp = understanding.target_comp
+    if understanding.state_mutation == StateMutationIntent.REPLACE and comp:
         update.update(comp_name=comp.display_name, active_comp_id=comp.canonical_id)
-    augments = [item.display_name for item in resolution.entities if item.entity_type == "augment"]
+    elif understanding.state_mutation in {
+        StateMutationIntent.CLEAR, StateMutationIntent.CANDIDATES,
+    }:
+        update.update(comp_name=None, active_comp_id=None)
+    augments = [item.display_name for item in understanding.resolved_entities
+                if item.entity_type == "augment"]
     if augments and re.search(r"选哪个|三选一|海克斯|强化", question):
         update["augment_choices"] = augments[:3]
-    emblems = [item.display_name for item in resolution.entities if item.entity_type == "emblem"]
+    emblems = [item.display_name for item in understanding.resolved_entities
+               if item.entity_type == "emblem"]
     if emblems:
         update["emblems"] = emblems
-    items = [item.display_name for item in resolution.entities if item.entity_type == "item"]
+    items = [item.display_name for item in understanding.resolved_entities
+             if item.entity_type == "item"]
     if items:
         update["item_components"] = items
     return state.model_copy(update=update)
+
+
+def _ordered_compositions(text: str, entities: list[ResolvedEntity]) -> list[ResolvedEntity]:
+    comps = [item for item in entities if item.entity_type == "composition"]
+    return sorted(comps, key=lambda item: _mention_position(text, item))
+
+
+def _mention_position(text: str, item: ResolvedEntity) -> int:
+    positions = [text.casefold().find(value.casefold()) for value in (
+        item.matched_alias, item.display_name,
+    )]
+    valid = [position for position in positions if position >= 0]
+    return min(valid) if valid else len(text)
+
+
+def _composition_semantics(
+    text: str, compositions: list[ResolvedEntity]
+) -> tuple[StateMutationIntent, ResolvedEntity | None, list[ResolvedEntity]]:
+    clear = bool(re.search(r"还?没定(?:阵容)?|未定阵容|暂时不玩|不玩.+了", text))
+    switch = re.search(r"换(?:成|到)?", text)
+    if switch:
+        target = next((item for item in compositions
+                       if _mention_position(text, item) >= switch.end()), None)
+        return ((StateMutationIntent.REPLACE, target, []) if target else
+                (StateMutationIntent.CLEAR, None, []))
+    available = [item for item in compositions if not re.search(
+        rf"(?:不玩|不考虑|放弃)[^，,。；;]*{re.escape(item.matched_alias)}", text,
+    )]
+    comparison = len(available) > 1 and bool(re.search(
+        r"和|与|还是|比较|判断|哪套|候选|考虑", text
+    ))
+    if comparison:
+        return StateMutationIntent.CANDIDATES, None, available
+    if clear:
+        return StateMutationIntent.CLEAR, None, []
+    if available:
+        return StateMutationIntent.REPLACE, available[0], []
+    return StateMutationIntent.RETAIN, None, []
+
+
+def _strategy_sections(intent: DecisionIntent, state: GameState) -> list[str]:
+    if intent == DecisionIntent.FULL_GUIDE:
+        return ["starting_conditions", "early_game", "mid_game", "late_game", "core",
+                "leveling"]
+    if intent == DecisionIntent.COMPOSITION_COMPARISON:
+        return ["starting_conditions", "mid_game", "late_game", "core", "leveling",
+                "economy", "reroll_pattern"]
+    bucket = _stage_bucket(state.stage, state.level)
+    if intent == DecisionIntent.CURRENT_DECISION:
+        if bucket == "early":
+            return ["starting_conditions", "early_game", "mid_game", "core", "economy",
+                    "reroll_pattern"]
+        return ["mid_game", "late_game", "core", "economy", "reroll_pattern",
+                "level_8_stabilization", "level_9_condition"]
+    if bucket == "early":
+        return ["early_game", "mid_game", "core", "transition", "conditional_advice"]
+    return ["mid_game", "late_game", "core", "transition", "conditional_advice"]
+
+
+def _stage_bucket(stage: str | None, level: int | None) -> str:
+    major = int(stage.split("-", 1)[0]) if stage and stage.split("-", 1)[0].isdigit() else None
+    if (major is not None and major <= 2) or (major is None and level is not None and level <= 5):
+        return "early"
+    if (major is not None and major >= 5) or (major is None and level is not None and level >= 9):
+        return "late"
+    return "mid"
+
+
+def _user_facts(state: GameState) -> dict[str, object]:
+    raw = state.model_dump(
+        exclude={"user_question", "active_comp_id", "board", "bench", "shop"},
+        exclude_none=True,
+    )
+    return {key: value for key, value in raw.items() if value not in ([], "")}
+
+
+def _format_evidence(item: EvidenceRecord) -> str:
+    return (
+        f"- {item.display_name} / {item.section}: {item.semantic_content} "
+        f"[来源：{item.source}｜版本：{item.source_patch or '未标注'}]"
+    )
+
+
+def _grouped_evidence(
+    evidence: list[EvidenceRecord], candidates: list[ResolvedEntity]
+) -> str:
+    if not candidates:
+        return "\n".join(_format_evidence(item) for item in evidence)
+    blocks: list[str] = []
+    candidate_ids = {item.canonical_id for item in candidates}
+    for index, candidate in enumerate(candidates, start=1):
+        records = [item for item in evidence
+                   if item.canonical_entity_id == candidate.canonical_id]
+        blocks.append(
+            f"CANDIDATE {index}: {candidate.display_name}\n"
+            + ("\n".join(_format_evidence(item) for item in records)
+               if records else "- No retrieved evidence")
+        )
+    remaining = [item for item in evidence
+                 if item.canonical_entity_id not in candidate_ids]
+    if remaining:
+        blocks.append("SHARED EVIDENCE\n" + "\n".join(
+            _format_evidence(item) for item in remaining
+        ))
+    return "\n\n".join(blocks)
 
 
 def comp_evidence(record: CompStatsRecord, requested_patch: str) -> list[EvidenceRecord]:
