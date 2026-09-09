@@ -1,23 +1,28 @@
-"""Unified application service shared by CLI and desktop frontends."""
+"""Unified application service with plan-driven, clean retrieval."""
 from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncIterator
+from time import perf_counter
 
 from tft_agent.agent.parser import GameStateParser
-from tft_agent.agent.state import AgentMessage
+from tft_agent.agent.state import AgentMessage, AgentState
+from tft_agent.app.entity_resolution import CanonicalEntityResolver
 from tft_agent.app.pipeline import (
     AnswerContext,
+    EvidenceRecord,
     ProductMode,
     QueryKind,
+    RepositoryCall,
     RetrievalPlan,
+    RetrievalTrace,
     RetrievedKnowledge,
+    apply_resolution,
     build_retrieval_plan,
-    comp_payload,
+    comp_evidence,
     context_gaps,
-    entity_payload,
+    static_evidence,
     understand_query,
 )
 from tft_agent.core.config import Settings
@@ -34,24 +39,28 @@ from tft_agent.llm.grounded_decision import GroundedDecisionClient
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
-from tft_agent.tft_mcp_server.schemas import CompStatsRecord
 from tft_agent.vision.deepseek_client import DeepSeekVisionClient
 from tft_agent.vision.workflow import observe_and_merge
 
 
 class AgentService:
-    """Run one deterministic retrieval pipeline and, for decisions, one LLM call."""
-
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
         self._cancelled_sessions: set[str] = set()
         self._repository: SQLiteGameDataRepository | None = None
+        self._entity_resolver: CanonicalEntityResolver | None = None
+        self.last_trace: RetrievalTrace | None = None
 
     def _repo(self) -> SQLiteGameDataRepository:
         if self._repository is None:
             self._repository = SQLiteGameDataRepository(self.settings.database_path.resolve())
             self._repository.initialize_sync()
         return self._repository
+
+    def _resolver(self) -> CanonicalEntityResolver:
+        if self._entity_resolver is None:
+            self._entity_resolver = CanonicalEntityResolver(self._repo(), self.settings)
+        return self._entity_resolver
 
     def cancel(self, session_id: str) -> None:
         self._cancelled_sessions.add(session_id)
@@ -63,24 +72,20 @@ class AgentService:
         if latest is None:
             return "DataTFT：尚未同步"
         metadata, count = latest
-        timestamp = metadata.retrieved_at.astimezone().strftime("%Y-%m-%d %H:%M")
         return (f"版本：{metadata.game_patch}｜DataTFT：已同步 {count} 套阵容｜"
-                f"更新时间：{timestamp}｜状态：{metadata.status.value}")
+                f"更新时间：{metadata.retrieved_at.astimezone():%Y-%m-%d %H:%M}｜"
+                f"状态：{metadata.status.value}")
 
     async def clear_session(self, session_id: str) -> None:
         await self._repo().clear_session(session_id)
 
     async def session_summary(self, session_id: str) -> str:
-        stored = await self._repo().load_session_state(session_id)
-        if stored is None:
-            return "当前局面：尚未记录"
-        state = GameState.model_validate_json(stored[0])
+        state = await self.load_game_state(session_id)
         parts = [value for value in (
             f"阵容 {state.comp_name}" if state.comp_name else None,
             f"阶段 {state.stage}" if state.stage else None,
             f"{state.level}级" if state.level else None,
             f"{state.gold}金币" if state.gold is not None else None,
-            "强化 " + "/".join(state.augments) if state.augments else None,
         ) if value]
         return "当前局面：" + ("｜".join(parts) if parts else "尚未记录")
 
@@ -102,13 +107,11 @@ class AgentService:
             yield ChatEvent(type="error", message="实验实时模式默认关闭。")
             return
         self._cancelled_sessions.discard(request.session_id)
-        yield ChatEvent(type="status", message="正在理解问题并规划检索…")
-        if request.confirmed_game_state is not None:
-            state = request.confirmed_game_state
-        else:
-            state = await self._merge_state(
-                request.session_id, GameStateParser().parse_text(request.text)
-            )
+        started = perf_counter()
+        yield ChatEvent(type="status", message="正在解析实体并规划检索…")
+        state = request.confirmed_game_state or await self._merge_state(
+            request.session_id, GameStateParser().parse_text(request.text)
+        )
         vision: DeepSeekVisionClient | None = None
         try:
             if request.screenshot_path is not None:
@@ -116,61 +119,75 @@ class AgentService:
                     self.settings.require_deepseek_api_key().get_secret_value(),
                     str(self.settings.deepseek_base_url), self.settings.vision_model,
                 )
-                from tft_agent.agent.state import AgentState
                 observed = await observe_and_merge(
                     AgentState(game_state=state, goal=request.text), request.screenshot_path,
                     vision, self.settings.vision_detail,
                 )
                 state = observed.game_state
                 yield ChatEvent(type="observation", message="截图识别完成", game_state=state)
-            if request.session_id in self._cancelled_sessions:
-                yield ChatEvent(type="cancelled", message="请求已取消")
-                return
-            if not self.settings.database_path.resolve().is_file():
-                yield ChatEvent(type="error", message="本地数据尚未初始化，请先运行数据同步命令。")
-                return
-            mode = ProductMode(request.product_mode)
-            understanding = understand_query(request.text, state, mode)
-            plan = build_retrieval_plan(understanding, state, self.settings.current_game_patch)
+            entity_start = perf_counter()
+            resolution = await self._resolver().resolve(request.text)
+            state = apply_resolution(state, resolution, request.text)
+            entity_end = perf_counter()
+            understanding = understand_query(
+                request.text, state, ProductMode(request.product_mode), resolution
+            )
+            plan = build_retrieval_plan(
+                understanding, state, self.settings.current_game_patch,
+                self.settings.current_set_number, self.settings.current_set_name,
+            )
+            plan_end = perf_counter()
+            knowledge, calls = await self._retrieve(request.text, plan)
+            retrieval_end = perf_counter()
             history_rows = await self._repo().load_session_messages(request.session_id)
             history = [AgentMessage(role=role, content=content) for role, content in history_rows]
-            knowledge = await self._retrieve(request.text, plan)
-            await self.save_game_state(request.session_id, state)
             gaps = context_gaps(state)
-            trace = plan.model_dump(mode="json")
-            yield ChatEvent(type="status", message="检索完成", retrieval_plan=trace,
-                            context_gaps=gaps)
+            context = AnswerContext(
+                question=request.text, understanding=understanding, game_state=state,
+                history=history, retrieval_plan=plan, evidence=knowledge.evidence,
+                context_gaps=gaps, knowledge_gaps=knowledge.knowledge_gaps,
+            )
+            context_summary = context.readable_summary()
+            context_end = perf_counter()
+            trace = RetrievalTrace(
+                original_query=request.text, resolved_entities=resolution.entities,
+                understanding=understanding, retrieval_plan=plan, repository_calls=calls,
+                retrieved_knowledge=knowledge, knowledge_gaps=knowledge.knowledge_gaps,
+                clean_context_summary=context_summary, llm_call_count=0,
+                stage_latency_ms={
+                    "entity_resolution": (entity_end - entity_start) * 1000,
+                    "planning": (plan_end - entity_end) * 1000,
+                    "retrieval": (retrieval_end - plan_end) * 1000,
+                    "context": (context_end - retrieval_end) * 1000,
+                    "local_total": (context_end - started) * 1000,
+                },
+            )
+            self.last_trace = trace
+            await self.save_game_state(request.session_id, state)
+            payload = trace.model_dump(mode="json")
+            yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
+                            context_gaps=[*gaps, *knowledge.knowledge_gaps])
             if understanding.kind == QueryKind.DETERMINISTIC_LOOKUP:
                 answer = _deterministic_answer(knowledge, self.settings.current_game_patch)
                 await self._record_answer(request, answer)
                 yield ChatEvent(type="answer", message=answer.recommendation, response=answer,
-                                advice_options=_advice_options(answer), retrieval_plan=trace,
+                                advice_options=_advice_options(answer), retrieval_plan=payload,
                                 context_gaps=gaps, llm_call_count=0)
                 return
-            if _critical_missing(request.text, state):
-                yield ChatEvent(
-                    type="error",
-                    message="还需要目标棋子或费用，才能判断当前搜牌概率。",
-                    retrieval_plan=trace,
-                    context_gaps=gaps,
-                    llm_call_count=0,
-                )
-                return
-            context = AnswerContext(
-                question=request.text, understanding=understanding, game_state=state,
-                history=history, retrieval_plan=plan, knowledge=knowledge, context_gaps=gaps,
-            )
-            yield ChatEvent(type="status", message="正在生成一次有证据的建议…",
-                            retrieval_plan=trace, context_gaps=gaps)
             client = GroundedDecisionClient(self.settings)
+            llm_started = perf_counter()
             try:
                 outcome = await client.decide_context(context)
             finally:
                 await client.close()
+            trace.llm_call_count = 1
+            trace.stage_latency_ms["llm"] = (perf_counter() - llm_started) * 1000
+            self.last_trace = trace
             await self._record_answer(request, outcome.response)
             yield ChatEvent(type="answer", message=outcome.response.recommendation,
                             response=outcome.response, advice_options=outcome.options,
-                            retrieval_plan=trace, context_gaps=gaps, llm_call_count=1)
+                            retrieval_plan=trace.model_dump(mode="json"), context_gaps=gaps,
+                            llm_call_count=1)
         except asyncio.CancelledError:
             yield ChatEvent(type="cancelled", message="请求已取消")
         except Exception as exc:
@@ -179,34 +196,90 @@ class AgentService:
             if vision is not None:
                 await vision.close()
 
+    async def _retrieve(
+        self, question: str, plan: RetrievalPlan
+    ) -> tuple[RetrievedKnowledge, list[RepositoryCall]]:
+        evidence: list[EvidenceRecord] = []
+        gaps: list[str] = []
+        calls: list[RepositoryCall] = []
+        if plan.target_comp:
+            start = perf_counter()
+            comp = await self._repo().find_comp_by_id(
+                plan.target_comp.canonical_id, plan.game_patch
+            )
+            calls.append(RepositoryCall(
+                operation="find_comp_by_id",
+                filters={"canonical_id": plan.target_comp.canonical_id,
+                         "game_patch": plan.game_patch}, result_count=int(comp is not None),
+                latency_ms=(perf_counter() - start) * 1000,
+            ))
+            if comp:
+                evidence.extend(item for item in comp_evidence(comp, plan.game_patch)
+                                if item.section in plan.knowledge_needs or
+                                item.section in {"core", "starting_conditions"})
+            else:
+                gaps.append("target composition is absent for the exact current patch")
+        elif plan.retrieve_all_comps:
+            start = perf_counter()
+            comps = await self._repo().search_comps(None, plan.game_patch, 8)
+            calls.append(RepositoryCall(
+                operation="browse_comps", filters={"game_patch": plan.game_patch, "limit": 8},
+                result_count=len(comps), latency_ms=(perf_counter() - start) * 1000,
+            ))
+            for comp in comps:
+                evidence.extend(comp_evidence(comp, plan.game_patch))
+        elif plan.candidate_selection_inputs:
+            gaps.append("no structured item/augment-to-composition candidate index is available")
+        static_entities = [item for item in plan.entities
+                           if item.entity_type in {"augment", "emblem", "item", "champion"}]
+        if static_entities:
+            start = perf_counter()
+            records = await self._repo().find_static_entities_by_ids(
+                [item.canonical_id for item in static_entities]
+            )
+            calls.append(RepositoryCall(
+                operation="find_static_entities_by_ids",
+                filters={"canonical_ids": [item.canonical_id for item in static_entities],
+                         "set_number": plan.set_number}, result_count=len(records),
+                latency_ms=(perf_counter() - start) * 1000,
+            ))
+            by_id = {record.entity_id: record for record in records}
+            for resolved in static_entities:
+                record = by_id.get(resolved.canonical_id)
+                item = static_evidence(record, resolved, plan.game_patch) if record else None
+                if item:
+                    evidence.append(item)
+                else:
+                    gaps.append(f"missing usable definition for {resolved.display_name}")
+        if plan.retrieve_strategy_text:
+            start = perf_counter()
+            chunks = await self._repo().search_knowledge_text(
+                question, plan.game_patch, 6,
+                plan.target_comp.display_name if plan.target_comp else None,
+            )
+            calls.append(RepositoryCall(
+                operation="search_strategy_text",
+                filters={"requested_patch": plan.game_patch,
+                         "set_name": plan.set_name,
+                         "target_comp": plan.target_comp.display_name if plan.target_comp else None,
+                         "sections": plan.knowledge_needs}, result_count=len(chunks),
+                latency_ms=(perf_counter() - start) * 1000,
+            ))
+            evidence.extend(_chunk_evidence(chunk, plan) for chunk in chunks)
+        available = {item.section for item in evidence}
+        for need in plan.knowledge_needs:
+            if need not in available and need not in {"composition", "leveling"}:
+                gaps.append(f"knowledge coverage missing: {need}")
+        unique = {item.evidence_id: item for item in evidence}
+        return RetrievedKnowledge(evidence=list(unique.values()),
+                                  knowledge_gaps=list(dict.fromkeys(gaps))), calls
+
     async def _merge_state(self, session_id: str, current: GameState) -> GameState:
-        stored = await self._repo().load_session_state(session_id)
-        if stored is None:
-            return current
-        previous = GameState.model_validate_json(stored[0])
+        previous = await self.load_game_state(session_id)
         update = {field: getattr(current, field) for field in current.model_fields_set
                   if field != "user_question"}
         update["user_question"] = current.user_question
         return previous.model_copy(update=update)
-
-    async def _retrieve(self, question: str, plan: RetrievalPlan) -> RetrievedKnowledge:
-        comps_task = self._repo().search_comps(plan.comp_query, plan.game_patch,
-                                                8 if plan.retrieve_all_comps else 3)
-        entities_task = self._repo().search_static_entities(plan.static_entity_names)
-        text_task = self._repo().search_knowledge_text(
-            question, plan.game_patch, 6, plan.comp_query
-        ) if plan.retrieve_strategy_text else asyncio.sleep(0, result=[])
-        odds_task = self._repo().get_shop_odds(plan.shop_odds_level, plan.game_patch) \
-            if plan.shop_odds_level else asyncio.sleep(0, result=None)
-        comps, entities, chunks, odds = await asyncio.gather(
-            comps_task, entities_task, text_task, odds_task
-        )
-        return RetrievedKnowledge(
-            comps=[comp_payload(item) for item in comps],
-            static_entities=[entity_payload(item) for item in entities],
-            strategy_chunks=chunks,
-            shop_odds=odds.model_dump(mode="json") if odds is not None else None,
-        )
 
     async def _record_answer(self, request: ChatRequest, answer: FinalResponse) -> None:
         await self._repo().append_session_messages(request.session_id, [
@@ -214,62 +287,45 @@ class AgentService:
         ])
 
 
-def _critical_missing(question: str, state: GameState) -> bool:
-    roll = bool(re.search(r"搜牌|要不要搜|该不该搜|roll", question, re.I))
-    return roll and state.target_champion is None and state.target_cost is None
+def _chunk_evidence(chunk: dict[str, object], plan: RetrievalPlan) -> EvidenceRecord:
+    source_patch = str(chunk.get("game_patch") or "") or None
+    identifier = str(chunk.get("document_id") or chunk.get("title"))
+    section = str(chunk.get("heading") or "strategy")
+    source = str(chunk.get("source") or "strategy knowledge")
+    return EvidenceRecord(
+        evidence_id=":".join((source, source_patch or "unversioned", "strategy", identifier,
+                              section)),
+        source=source, requested_patch=plan.game_patch, source_patch=source_patch,
+        patch_match=str(chunk.get("patch_match") or "exact"), entity_type="strategy",
+        canonical_entity_id=identifier, display_name=str(chunk.get("title") or "攻略"),
+        section=section, semantic_content=str(chunk.get("text") or ""),
+        relevance_score=float(str(chunk.get("relevance_score") or 0)),
+        url=str(chunk.get("url") or ""),
+    )
 
 
 def _deterministic_answer(knowledge: RetrievedKnowledge, patch: str) -> FinalResponse:
-    if not knowledge.comps:
-        return FinalResponse(recommendation=f"本地数据库没有找到 {patch} 的对应阵容资料。")
-    lines = []
-    for comp in knowledge.comps:
-        line = f"• {comp['name']}（{comp.get('tier') or '未分级'}级）"
-        if comp.get("core_units"):
-            line += "｜核心：" + "、".join(comp["core_units"])
-        if comp.get("recommended_items"):
-            line += "｜装备：" + "、".join(comp["recommended_items"][:4])
-        if comp.get("augments"):
-            line += "｜强化：" + "、".join(comp["augments"][:3])
-        if comp.get("level_plan"):
-            line += "｜运营：" + "；".join(comp["level_plan"][:3])
-        lines.append(line)
-    snapshot = knowledge.comps[0].get("snapshot", {})
-    url = snapshot.get("source_url") if isinstance(snapshot, dict) else None
-    return FinalResponse(
-        recommendation=f"当前版本 {patch} 阵容资料：\n" + "\n".join(lines), confidence=1,
-        used_tools=["structured_sqlite_retrieval"],
-        sources=[f"DataTFT {patch} — {url}"] if url else [],
+    relevant = [item for item in knowledge.evidence if item.section == "core_units"]
+    if relevant:
+        item = relevant[0]
+        values = item.semantic_content if isinstance(item.semantic_content, list) else []
+        return FinalResponse(
+            recommendation=f"{item.display_name}的核心棋子：{'、'.join(values)}。",
+            used_tools=["structured_sqlite_retrieval"],
+            sources=[f"{item.display_name} · {item.section} — {item.url}"],
+        )
+    comps = list(dict.fromkeys(item.display_name for item in knowledge.evidence
+                               if item.entity_type == "composition"))
+    message = f"当前版本 {patch} 阵容：" + "、".join(comps) if comps else (
+        f"本地数据库没有找到 {patch} 的对应事实。"
     )
+    return FinalResponse(recommendation=message, used_tools=["structured_sqlite_retrieval"])
 
 
 def _advice_options(response: FinalResponse) -> list[AdviceOption]:
-    evidence = [AdviceEvidence(label=s, url=s.rsplit(" — ", 1)[-1], source="retrieved")
-                for s in response.sources if " — http" in s]
+    evidence = [AdviceEvidence(label=value.rsplit(" — ", 1)[0],
+                               url=value.rsplit(" — ", 1)[-1], source="retrieved")
+                for value in response.sources if " — http" in value]
     return [AdviceOption(title="结果", action=response.recommendation, conditions=[],
                          expected_benefit="基于当前版本本地数据。",
-                         risk="数据覆盖不足时需要补充信息。",
-                         confidence=response.confidence or 0.5, evidence=evidence)]
-
-
-# Compatibility helpers retained for one deprecation cycle; production does not call them.
-def _datatft_direct_answer(question: str, records: list[CompStatsRecord]) -> FinalResponse | None:
-    decision = any(term in question.casefold() for term in (
-        "怎么玩", "为什么", "推荐", "比较", "选择", "怎么选", "该不该", "怎么办", "转阵"
-    ))
-    if decision or not records:
-        return None
-    return _deterministic_answer(
-        RetrievedKnowledge(comps=[comp_payload(item) for item in records]),
-        records[0].snapshot.game_patch,
-    )
-
-
-def _related_comp(question: str, history: list[AgentMessage],
-                  records: list[CompStatsRecord]) -> CompStatsRecord | None:
-    for text in [question, *(message.content for message in reversed(history)
-                              if message.role == "user")]:
-        match = next((item for item in records if item.name.casefold() in text.casefold()), None)
-        if match:
-            return match
-    return None
+                         risk="数据覆盖不足时已明确标注。", confidence=1, evidence=evidence)]

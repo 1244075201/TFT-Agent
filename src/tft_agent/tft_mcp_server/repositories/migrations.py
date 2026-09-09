@@ -122,6 +122,31 @@ MIGRATIONS = [
     CREATE INDEX idx_session_messages_session
         ON session_messages(session_id, message_id);
     """,
+    """
+    CREATE TABLE canonical_entities (
+        canonical_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        game_patch TEXT NOT NULL,
+        set_number INTEGER NOT NULL,
+        set_name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        PRIMARY KEY(canonical_id, game_patch, set_number)
+    );
+    CREATE TABLE entity_aliases (
+        alias TEXT NOT NULL COLLATE NOCASE,
+        canonical_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        game_patch TEXT NOT NULL,
+        set_number INTEGER NOT NULL,
+        alias_kind TEXT NOT NULL,
+        PRIMARY KEY(alias, canonical_id, game_patch, set_number)
+    );
+    CREATE INDEX idx_canonical_entities_scope_name
+        ON canonical_entities(game_patch, set_number, display_name COLLATE NOCASE);
+    CREATE INDEX idx_entity_aliases_scope_alias
+        ON entity_aliases(game_patch, set_number, alias COLLATE NOCASE);
+    """,
 ]
 
 

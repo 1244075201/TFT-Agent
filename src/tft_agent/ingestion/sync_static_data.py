@@ -15,11 +15,18 @@ async def sync() -> int:
         str(settings.communitydragon_base_url),
         settings.static_data_version,
         str(settings.communitydragon_tft_url),
+        current_set_number=settings.current_set_number,
     )
     records = await asyncio.to_thread(source.fetch)
     repository = SQLiteGameDataRepository(settings.database_path.resolve())
     await repository.initialize()
     await repository.replace_static_entities(records)
+    await repository.rebuild_canonical_catalog(
+        settings.current_game_patch,
+        settings.current_set_number,
+        settings.current_set_name,
+        active_static_ids=source.active_entity_ids,
+    )
     return len(records)
 
 

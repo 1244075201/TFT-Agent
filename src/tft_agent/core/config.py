@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     database_path: Path = Path("data/tft.sqlite3")
     current_game_patch: str = "18.1d"
     current_set_name: str = "Enchanted Wilds"
+    current_set_number: int = Field(default=18, ge=1)
+    entity_fuzzy_threshold: float = Field(default=0.9, ge=0, le=1)
     static_data_version: str = "16.17"
     communitydragon_base_url: AnyHttpUrl = AnyHttpUrl(
         "https://raw.communitydragon.org/16.17/plugins/rcp-be-lol-game-data/global/zh_cn/v1/"

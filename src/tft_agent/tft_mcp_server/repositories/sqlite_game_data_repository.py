@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from tft_agent.tft_mcp_server.repositories.migrations import apply_migrations
 from tft_agent.tft_mcp_server.schemas import (
@@ -130,6 +131,39 @@ class SQLiteGameDataRepository:
             limit,
             strategy_comp_name,
         )
+
+    async def rebuild_canonical_catalog(
+        self,
+        game_patch: str,
+        set_number: int,
+        set_name: str,
+        explicit_aliases: Sequence[dict[str, str]] = (),
+        active_static_ids: Sequence[str] = (),
+    ) -> None:
+        await asyncio.to_thread(
+            self._rebuild_canonical_catalog_sync,
+            game_patch,
+            set_number,
+            set_name,
+            list(explicit_aliases),
+            list(active_static_ids),
+        )
+
+    async def canonical_catalog(
+        self, game_patch: str, set_number: int
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._canonical_catalog_sync, game_patch, set_number)
+
+    async def find_static_entities_by_ids(
+        self, canonical_ids: Sequence[str]
+    ) -> list[StaticEntityRecord]:
+        return await asyncio.to_thread(self._find_static_entities_by_ids_sync, list(canonical_ids))
+
+    async def find_comp_by_id(
+        self, canonical_id: str, game_patch: str
+    ) -> CompStatsRecord | None:
+        records = await asyncio.to_thread(self._find_comp_by_id_sync, canonical_id, game_patch)
+        return records
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
@@ -453,8 +487,31 @@ class SQLiteGameDataRepository:
             else:
                 tokens.append(token)
         tokens = list(dict.fromkeys(tokens))
-        clauses = ["(? IS NULL OR d.game_patch IS NULL OR d.game_patch = ?)"]
-        params: list[object] = [game_patch, game_patch]
+        rows = self._search_knowledge_rows(
+            query, tokens, game_patch, limit, strategy_comp_name, "exact"
+        )
+        base_patch = re.sub(r"[a-z]+$", "", game_patch or "", flags=re.I)
+        if not rows and game_patch and base_patch != game_patch:
+            rows = self._search_knowledge_rows(
+                query, tokens, base_patch, limit, strategy_comp_name, "family_fallback"
+            )
+        if not rows:
+            rows = self._search_knowledge_rows(
+                query, tokens, None, limit, strategy_comp_name, "unversioned"
+            )
+        return rows
+
+    def _search_knowledge_rows(
+        self,
+        query: str,
+        tokens: list[str],
+        source_patch: str | None,
+        limit: int,
+        strategy_comp_name: str | None,
+        patch_match: str,
+    ) -> list[dict[str, object]]:
+        clauses = ["d.game_patch IS NULL"] if source_patch is None else ["d.game_patch = ?"]
+        params: list[object] = [] if source_patch is None else [source_patch]
         if strategy_comp_name:
             clauses.append("d.strategy_comp_names LIKE ?")
             params.append(f"%{strategy_comp_name}%")
@@ -465,7 +522,7 @@ class SQLiteGameDataRepository:
             clauses.append("(" + token_clauses + ")")
             for token in tokens:
                 params.extend((f"%{token}%", f"%{token}%"))
-        params.append(limit)
+        params.append(max(limit * 5, limit))
         sql = (
             "SELECT c.chunk_id, c.heading, c.text, d.title, d.source, d.source_type, "
             "d.document_type, d.game_patch, d.url, d.retrieved_at "
@@ -474,7 +531,124 @@ class SQLiteGameDataRepository:
             + " ORDER BY d.retrieved_at DESC, c.chunk_index LIMIT ?"
         )
         with self._connect() as connection:
-            return [dict(row) for row in connection.execute(sql, params).fetchall()]
+            rows = [dict(row) for row in connection.execute(sql, params).fetchall()]
+        ranked: list[dict[str, object]] = []
+        for row in rows:
+            haystack = f"{row['title']} {row['heading']} {row['text']}".casefold()
+            score = sum(token.casefold() in haystack for token in tokens) / max(len(tokens), 1)
+            if score <= 0 and tokens:
+                continue
+            row["relevance_score"] = round(score, 4)
+            row["patch_match"] = patch_match
+            ranked.append(row)
+        return sorted(
+            ranked, key=lambda item: float(str(item["relevance_score"])), reverse=True
+        )[:limit]
+
+    def _rebuild_canonical_catalog_sync(
+        self,
+        game_patch: str,
+        set_number: int,
+        set_name: str,
+        explicit_aliases: list[dict[str, str]],
+        active_static_ids: list[str],
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM entity_aliases WHERE game_patch=? AND set_number=?",
+                (game_patch, set_number),
+            )
+            connection.execute(
+                "DELETE FROM canonical_entities WHERE game_patch=? AND set_number=?",
+                (game_patch, set_number),
+            )
+            comps = connection.execute(
+                "SELECT DISTINCT c.comp_id, c.name FROM datatft_comps c "
+                "JOIN datatft_snapshots s USING(snapshot_id) "
+                "WHERE s.game_patch=? AND s.status IN ('valid','stale')",
+                (game_patch,),
+            ).fetchall()
+            static_sql = "SELECT entity_id, entity_type, name FROM static_entities"
+            static_params: list[object] = []
+            if active_static_ids:
+                marks = ",".join("?" for _ in active_static_ids)
+                static_sql += f" WHERE entity_id IN ({marks})"
+                static_params.extend(active_static_ids)
+            else:
+                # Compatibility bootstrap for databases synchronized before active-set metadata.
+                static_sql += " WHERE entity_id LIKE ? OR entity_id LIKE 'DA_Component_%'"
+                static_params.append(f"DA%{set_number}%")
+            static = connection.execute(static_sql, static_params).fetchall()
+            entities = [
+                (str(row["comp_id"]), "composition", str(row["name"]), "datatft")
+                for row in comps
+            ] + [
+                (
+                    str(row["entity_id"]), str(row["entity_type"]),
+                    str(row["name"]), "communitydragon",
+                )
+                for row in static
+                if row["name"] and "_Name" not in str(row["name"])
+            ]
+            connection.executemany(
+                "INSERT INTO canonical_entities VALUES (?,?,?,?,?,?,?)",
+                [(identifier, kind, name, game_patch, set_number, set_name, source)
+                 for identifier, kind, name, source in entities],
+            )
+            aliases = _catalog_aliases(entities, explicit_aliases)
+            connection.executemany(
+                "INSERT OR IGNORE INTO entity_aliases VALUES (?,?,?,?,?,?)",
+                [(alias, identifier, kind, game_patch, set_number, alias_kind)
+                 for alias, identifier, kind, alias_kind in aliases],
+            )
+
+    def _canonical_catalog_sync(
+        self, game_patch: str, set_number: int
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT e.*, a.alias, a.alias_kind FROM canonical_entities e "
+                "LEFT JOIN entity_aliases a ON a.canonical_id=e.canonical_id "
+                "AND a.game_patch=e.game_patch AND a.set_number=e.set_number "
+                "WHERE e.game_patch=? AND e.set_number=? ORDER BY e.entity_type,e.display_name",
+                (game_patch, set_number),
+            ).fetchall()
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = grouped.setdefault(str(row["canonical_id"]), {
+                "canonical_id": row["canonical_id"], "entity_type": row["entity_type"],
+                "display_name": row["display_name"], "game_patch": row["game_patch"],
+                "set_number": row["set_number"], "set_name": row["set_name"],
+                "source": row["source"], "aliases": [],
+            })
+            if row["alias"]:
+                item["aliases"].append(row["alias"])
+        return list(grouped.values())
+
+    def _find_static_entities_by_ids_sync(
+        self, canonical_ids: list[str]
+    ) -> list[StaticEntityRecord]:
+        if not canonical_ids:
+            return []
+        marks = ",".join("?" for _ in canonical_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM static_entities WHERE entity_id IN ({marks})", canonical_ids
+            ).fetchall()
+        return [StaticEntityRecord(
+            entity_id=row["entity_id"], entity_type=row["entity_type"], name=row["name"],
+            description=row["description"], traits=json.loads(row["traits"]),
+            components=json.loads(row["components"]), tags=json.loads(row["tags"]),
+            data_version=row["data_version"], source=row["source"],
+            source_url=row["source_url"], retrieved_at=row["retrieved_at"],
+        ) for row in rows]
+
+    def _find_comp_by_id_sync(
+        self, canonical_id: str, game_patch: str
+    ) -> CompStatsRecord | None:
+        records = self._search_comps_sync(None, game_patch, 100)
+        return next((record for record in records if record.comp_id == canonical_id), None)
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ChampionRecord:
@@ -495,3 +669,42 @@ class SQLiteGameDataRepository:
             source=row["source"],
             retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
         )
+
+
+def _catalog_aliases(
+    entities: list[tuple[str, str, str, str]], explicit: list[dict[str, str]]
+) -> list[tuple[str, str, str, str]]:
+    candidates: list[tuple[str, str, str, str]] = []
+    by_name = {(kind, name): identifier for identifier, kind, name, _ in entities}
+    for identifier, kind, name, _ in entities:
+        compact = re.sub(r"[\s·•_\-]", "", name).casefold()
+        candidates.append((compact, identifier, kind, "normalized"))
+        minimum = 3 if kind == "composition" else 2
+        if len(compact) > minimum:
+            candidates.extend((compact[:size], identifier, kind, "generated_prefix")
+                              for size in range(minimum, len(compact)))
+            candidates.extend((compact[-size:], identifier, kind, "generated_suffix")
+                              for size in range(minimum, len(compact)))
+        if kind == "emblem" and name.endswith("纹章"):
+            candidates.append((name.removesuffix("纹章") + "转", identifier, kind,
+                               "emblem_suffix"))
+    explicit_candidates: list[tuple[str, str, str, str]] = []
+    for item in explicit:
+        resolved_identifier = by_name.get(
+            (item.get("entity_type", ""), item.get("canonical_name", ""))
+        )
+        if resolved_identifier and item.get("alias"):
+            explicit_candidates.append(
+                (item["alias"], resolved_identifier, item["entity_type"], "explicit")
+            )
+    # A small reviewed alias table is authoritative over generated abbreviations. This
+    # lets common language disambiguate entities without weakening global matching.
+    explicit_keys = {(kind, alias.casefold()) for alias, _, kind, _ in explicit_candidates}
+    candidates = [item for item in candidates
+                  if (item[2], item[0].casefold()) not in explicit_keys]
+    candidates.extend(explicit_candidates)
+    counts: dict[tuple[str, str], set[str]] = {}
+    for alias, identifier, kind, _ in candidates:
+        counts.setdefault((kind, alias.casefold()), set()).add(identifier)
+    return [item for item in candidates
+            if len(counts[(item[2], item[0].casefold())]) == 1]

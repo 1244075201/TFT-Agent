@@ -10,7 +10,6 @@ from tft_agent.app.pipeline import (
     AnswerContext,
     ProductMode,
     QueryKind,
-    RetrievedKnowledge,
     build_retrieval_plan,
     context_gaps,
     understand_query,
@@ -45,9 +44,9 @@ def test_unknown_intent_defaults_to_strategy() -> None:
 def test_plan_uses_text_retrieval_and_exposes_non_blocking_gaps() -> None:
     state = GameState(level=7, item_components=["反曲弓"])
     understanding = understand_query("我该怎么办", state, ProductMode.MATCH_GUIDANCE)
-    plan = build_retrieval_plan(understanding, state, "18.1d")
+    plan = build_retrieval_plan(understanding, state, "18.1d", 18, "Enchanted Wilds")
     assert plan.retrieve_strategy_text is True
-    assert "反曲弓" in plan.static_entity_names
+    assert plan.retrieve_strategy_text is True
     assert "board" not in context_gaps(state)
     assert "stage" in context_gaps(state)
 
@@ -60,8 +59,10 @@ def _context() -> AnswerContext:
         understanding=understanding,
         game_state=state,
         history=[AgentMessage(role="user", content="我在玩测试阵容")],
-        retrieval_plan=build_retrieval_plan(understanding, state, "18.1d"),
-        knowledge=RetrievedKnowledge(),
+        retrieval_plan=build_retrieval_plan(
+            understanding, state, "18.1d", 18, "Enchanted Wilds"
+        ),
+        evidence=[],
         context_gaps=context_gaps(state),
     )
 

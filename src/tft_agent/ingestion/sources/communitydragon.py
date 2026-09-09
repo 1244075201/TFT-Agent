@@ -17,12 +17,15 @@ class CommunityDragonSource:
         base_url: str,
         data_version: str,
         tft_url: str | None = None,
+        current_set_number: int | None = None,
         timeout_seconds: float = 30,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
         self.data_version = data_version
         self.tft_url = tft_url
         self.timeout_seconds = timeout_seconds
+        self.current_set_number = current_set_number
+        self.active_entity_ids: list[str] = []
 
     def fetch(self) -> list[StaticEntityRecord]:
         timestamp = datetime.now(UTC)
@@ -37,7 +40,27 @@ class CommunityDragonSource:
         if self.tft_url:
             payload = self._get_json(self.tft_url)
             records.extend(self.normalize(payload, "item", self.tft_url, timestamp))
+            self.active_entity_ids = self._active_ids(payload)
         return list({record.entity_id: record for record in records}.values())
+
+    def _active_ids(self, payload: Any) -> list[str]:
+        if self.current_set_number is None or not isinstance(payload, dict):
+            return []
+        set_data = payload.get("setData")
+        if not isinstance(set_data, list):
+            return []
+        selected = next((item for item in set_data if isinstance(item, dict)
+                         and item.get("number") == self.current_set_number), None)
+        if not isinstance(selected, dict):
+            raise ValueError(f"CommunityDragon has no setData for set {self.current_set_number}")
+        identifiers: list[str] = []
+        for key in ("augments", "items"):
+            identifiers.extend(str(item) for item in selected.get(key, []) if item)
+        for key in ("champions", "traits"):
+            for item in selected.get(key, []):
+                if isinstance(item, dict) and item.get("apiName"):
+                    identifiers.append(str(item["apiName"]))
+        return list(dict.fromkeys(identifiers))
 
     def normalize(
         self,

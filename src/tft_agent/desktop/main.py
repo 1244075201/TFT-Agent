@@ -294,8 +294,7 @@ def main() -> None:
                     self.chat.append(
                         "<div style='margin:8px;padding:10px;border:1px solid #888'>"
                         f"<b>{option.title}</b><br>{option.action}<br>"
-                        f"收益：{option.expected_benefit}<br>风险：{option.risk}<br>"
-                        f"置信度：{option.confidence:.0%}<br>{sources}</div>"
+                        f"收益：{option.expected_benefit}<br>风险：{option.risk}<br>{sources}</div>"
                     )
             elif event.type == "observation" and event.game_state is not None:
                 state = event.game_state
