@@ -71,6 +71,25 @@ def test_communitydragon_normalizes_chinese_augment_effect() -> None:
     assert records[0].description == "队伍获得 12% 加成"
 
 
+def test_communitydragon_normalizes_active_set_champions_and_traits() -> None:
+    source = CommunityDragonSource(
+        "https://example.test/", "16.17", current_set_number=18,
+        tft_url="https://example.test/tft.json",
+    )
+    payload = {"setData": [{
+        "number": 18,
+        "champions": [{"apiName": "TFT18_Ashe", "name": "艾希"}],
+        "traits": [{"apiName": "TFT18_Quickstriker", "name": "迅捷射手"}],
+    }]}
+
+    records = source._active_set_records(payload, datetime(2026, 9, 9, tzinfo=UTC))
+
+    assert [(record.entity_id, record.entity_type) for record in records] == [
+        ("TFT18_Ashe", "champion"),
+        ("TFT18_Quickstriker", "trait"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_static_entities_and_session_state_round_trip(tmp_path: Path) -> None:
     repository = SQLiteGameDataRepository(tmp_path / "state.sqlite3")

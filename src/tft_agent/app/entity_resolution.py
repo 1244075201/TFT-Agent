@@ -47,7 +47,7 @@ class CanonicalEntityResolver:
                 self.settings.current_game_patch,
                 self.settings.current_set_number,
                 self.settings.current_set_name,
-                _explicit_aliases(),
+                explicit_aliases(),
             )
             catalog = await self.repository.canonical_catalog(
                 self.settings.current_game_patch, self.settings.current_set_number
@@ -171,7 +171,7 @@ def _normalize(value: str) -> str:
     return re.sub(r"[\s，,。！？!?、·•_\-]", "", value).casefold()
 
 
-def _explicit_aliases() -> list[dict[str, str]]:
+def explicit_aliases() -> list[dict[str, str]]:
     path = Path(__file__).parents[3] / "data_sources" / "entity_aliases.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

@@ -40,8 +40,28 @@ class CommunityDragonSource:
         if self.tft_url:
             payload = self._get_json(self.tft_url)
             records.extend(self.normalize(payload, "item", self.tft_url, timestamp))
+            records.extend(self._active_set_records(payload, timestamp))
             self.active_entity_ids = self._active_ids(payload)
         return list({record.entity_id: record for record in records}.values())
+
+    def _active_set_records(
+        self, payload: Any, timestamp: datetime
+    ) -> list[StaticEntityRecord]:
+        if self.current_set_number is None or not isinstance(payload, dict):
+            return []
+        set_data = payload.get("setData")
+        if not isinstance(set_data, list):
+            return []
+        selected = next((item for item in set_data if isinstance(item, dict)
+                         and item.get("number") == self.current_set_number), None)
+        if not isinstance(selected, dict):
+            return []
+        records: list[StaticEntityRecord] = []
+        for key, entity_type in (("champions", "champion"), ("traits", "trait")):
+            records.extend(self.normalize(
+                selected.get(key, []), entity_type, self.tft_url or self.base_url, timestamp
+            ))
+        return records
 
     def _active_ids(self, payload: Any) -> list[str]:
         if self.current_set_number is None or not isinstance(payload, dict):

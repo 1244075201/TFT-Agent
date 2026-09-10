@@ -38,7 +38,7 @@ from tft_agent.core.schemas import (
     FinalResponse,
     GameState,
 )
-from tft_agent.desktop.catalog import CanonicalEntityCatalog
+from tft_agent.desktop.catalog import CanonicalEntityCatalog, CompositionCard
 from tft_agent.llm.grounded_decision import GroundedDecisionClient
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
@@ -120,6 +120,19 @@ class AgentService:
                 await self._repo().find_static_entities_by_ids(static_ids[offset : offset + 500])
             )
         return CanonicalEntityCatalog.from_repository(rows, static)
+
+    async def composition_cards(self, limit: int = 6) -> list[CompositionCard]:
+        """Return current-patch composition summaries without repository internals."""
+        records = await self._repo().search_comps(
+            None, self.settings.current_game_patch, limit=limit
+        )
+        return [CompositionCard(
+            canonical_id=record.comp_id,
+            display_name=record.name,
+            tier=record.tier,
+            core_units=record.core_units,
+            summary=record.level_plan[0] if record.level_plan else None,
+        ) for record in records]
 
     async def ask(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         if (

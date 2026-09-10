@@ -7,8 +7,14 @@ from tft_agent.app.service import AgentService
 from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import ChatRequest, GameState
-from tft_agent.desktop.catalog import CanonicalEntityCatalog, EntityOption, is_component
-from tft_agent.desktop.selectors import EntitySelectorModel
+from tft_agent.desktop.catalog import (
+    CanonicalEntityCatalog,
+    EntityOption,
+    is_component,
+    search_match_reason,
+)
+from tft_agent.desktop.requests import game_state_summary, guide_request, match_request
+from tft_agent.desktop.selectors import AugmentChoiceModel, EntitySelectorModel
 
 
 def _catalog() -> CanonicalEntityCatalog:
@@ -52,6 +58,7 @@ def test_selector_searches_aliases_and_enforces_type() -> None:
     assert [item.display_name for item in model.suggestions("天使")] == ["森林天使"]
     model.select(model.suggestions("天使")[0])
     assert model.display_values() == ["森林天使"]
+    assert search_match_reason(model.selected[0], "天使") == "匹配别名：天使"
     with pytest.raises(ValueError):
         model.select(_catalog().options[1])
 
@@ -71,6 +78,36 @@ def test_general_guide_has_an_isolated_stateless_scope() -> None:
     assert scope.session_id == "desktop:general-guide"
     assert scope.uses_game_state is False
     assert scope.accepts_screenshot is False
+
+
+def test_workspace_requests_use_independent_sessions_and_modes() -> None:
+    guide = guide_request("神谕转怎么玩")
+    state = GameState(stage="4-1", level=8)
+    match = match_request("神谕转怎么玩", state)
+    assert (guide.session_id, guide.product_mode, guide.confirmed_game_state) == (
+        "desktop-guide", "general_guide", None
+    )
+    assert (match.session_id, match.product_mode, match.confirmed_game_state) == (
+        "desktop-match", "match_guidance", state
+    )
+
+
+def test_augment_choices_keep_slots_stable_and_reject_duplicates() -> None:
+    first = EntityOption(canonical_id="a", display_name="宝宝学院", entity_type="augment")
+    second = EntityOption(canonical_id="b", display_name="三幻神", entity_type="augment")
+    choices = AugmentChoiceModel()
+    choices.choose(0, first)
+    choices.choose(2, second)
+    choices.clear_slot(0)
+    assert choices.slots == [None, None, second]
+    with pytest.raises(ValueError):
+        choices.choose(1, second)
+
+
+def test_game_state_summary_is_compact() -> None:
+    assert game_state_summary(GameState(
+        stage="4-1", level=8, gold=35, hp=50, comp_name="艾希95"
+    )) == "4-1 · 8级 · 35金 · 50血 · 艾希95"
 
 
 @pytest.mark.asyncio

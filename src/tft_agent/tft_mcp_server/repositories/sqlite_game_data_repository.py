@@ -699,9 +699,9 @@ def _catalog_aliases(
             )
     # A small reviewed alias table is authoritative over generated abbreviations. This
     # lets common language disambiguate entities without weakening global matching.
-    explicit_keys = {(kind, alias.casefold()) for alias, _, kind, _ in explicit_candidates}
+    explicit_keys = {alias.casefold() for alias, _, _, _ in explicit_candidates}
     candidates = [item for item in candidates
-                  if (item[2], item[0].casefold()) not in explicit_keys]
+                  if item[0].casefold() not in explicit_keys]
     candidates.extend(explicit_candidates)
     counts: dict[tuple[str, str], set[str]] = {}
     for alias, identifier, kind, _ in candidates:

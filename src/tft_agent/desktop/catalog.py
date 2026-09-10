@@ -22,6 +22,14 @@ class EntityOption(StrictModel):
     icon_ref: str | None = None
 
 
+class CompositionCard(StrictModel):
+    canonical_id: str
+    display_name: str
+    tier: str | None = None
+    core_units: list[str] = Field(default_factory=list)
+    summary: str | None = None
+
+
 class CanonicalEntityCatalog:
     def __init__(self, options: Iterable[EntityOption]) -> None:
         self.options = list(options)
@@ -99,6 +107,21 @@ def is_component(option: EntityOption) -> bool:
 
 def is_completed_item(option: EntityOption) -> bool:
     return not is_component(option) and bool(option.components)
+
+
+def search_match_reason(option: EntityOption, query: str) -> str:
+    normalized = _normalize(query)
+    if normalized and normalized in {_normalize(alias) for alias in option.aliases}:
+        alias = next(alias for alias in option.aliases if _normalize(alias) == normalized)
+        return f"匹配别名：{alias}"
+    labels = {
+        "composition": "当前版本 · 阵容",
+        "augment": "当前 Set · 强化",
+        "item": "当前 Set · 装备",
+        "emblem": "当前 Set · 转职",
+        "champion": "当前 Set · 棋子",
+    }
+    return labels.get(option.entity_type, option.entity_type)
 
 
 def _normalize(value: str) -> str:
