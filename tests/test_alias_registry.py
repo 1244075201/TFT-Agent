@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
+import pytest
+
 from tft_agent.app.aliases import AliasEntry, AliasRegistry, EntityTextNormalizer
+from tft_agent.app.service import AgentService
+from tft_agent.core.config import Settings
 
 
 def test_normalizer_handles_nfkc_case_space_and_punctuation() -> None:
@@ -32,11 +39,38 @@ def test_registry_materializes_scope_and_rejects_missing_conflicts() -> None:
     }
 
 
-def test_registry_default_contains_only_reviewed_effective_initial_set() -> None:
+def test_registry_default_contains_reviewed_alias_sets() -> None:
     registry = AliasRegistry.load_default()
     approved = [entry for entry in registry.entries if entry.review_status == "approved"]
-    assert sum(entry.entity_type == "champion" for entry in approved) == 10
+    assert sum(entry.entity_type == "champion" for entry in approved) == 39
     assert sum(entry.entity_type == "item" for entry in approved) == 18
     assert sum(entry.entity_type == "composition" for entry in approved) == 3
     assert not any("generated_prefix" in entry.notes or "generated_suffix" in entry.notes
                    for entry in registry.entries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["狮子狗", "螳螂", "奶妈", "石头人"])
+async def test_ui_and_chat_share_champion_alias_identity(alias: str, tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "data" / "tft.sqlite3"
+    database = tmp_path / "aliases.sqlite3"
+    shutil.copy2(source, database)
+    service = AgentService(Settings(database_path=database))
+    resolved = await service._resolver().resolve(alias)
+    chat = next(item for item in resolved.entities if item.entity_type == "champion")
+    catalog = await service.entity_catalog()
+    ui = next(item for item in catalog.search(alias) if item.entity_type == "champion")
+    assert ui.canonical_id == chat.canonical_id
+
+
+@pytest.mark.asyncio
+async def test_existing_item_alias_still_uses_the_same_catalog(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "data" / "tft.sqlite3"
+    database = tmp_path / "item-alias.sqlite3"
+    shutil.copy2(source, database)
+    service = AgentService(Settings(database_path=database))
+    resolved = await service._resolver().resolve("青龙刀")
+    chat = next(item for item in resolved.entities if item.entity_type == "item")
+    catalog = await service.entity_catalog()
+    ui = next(item for item in catalog.search("青龙刀") if item.entity_type == "item")
+    assert ui.canonical_id == chat.canonical_id
