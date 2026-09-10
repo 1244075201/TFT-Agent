@@ -34,6 +34,11 @@
       "alias": "蛇女",
       "entity_type": "composition",
       "canonical_name": "6护卫蛇女"
+    },
+    {
+      "alias": "蓝buff",
+      "entity_type": "item",
+      "canonical_name": "蓝霸符"
     }
   ]
 }

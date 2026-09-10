@@ -27,6 +27,7 @@ from tft_agent.app.pipeline import (
     static_evidence,
     understand_query,
 )
+from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import (
     AdviceEvidence,
@@ -37,6 +38,7 @@ from tft_agent.core.schemas import (
     FinalResponse,
     GameState,
 )
+from tft_agent.desktop.catalog import CanonicalEntityCatalog
 from tft_agent.llm.grounded_decision import GroundedDecisionClient
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
@@ -81,6 +83,9 @@ class AgentService:
     async def clear_session(self, session_id: str) -> None:
         await self._repo().clear_session(session_id)
 
+    async def clear_product_session(self, session_id: str, product_mode: ProductMode) -> None:
+        await self._repo().clear_session(session_scope(session_id, product_mode).session_id)
+
     async def session_summary(self, session_id: str) -> str:
         state = await self.load_game_state(session_id)
         parts = [value for value in (
@@ -101,6 +106,21 @@ class AgentService:
             session_id, state.model_dump_json(), json.dumps(sources, ensure_ascii=False)
         )
 
+    async def entity_catalog(self) -> CanonicalEntityCatalog:
+        """Return a presentation-safe, active-patch catalog for desktop controls."""
+        rows = await self._resolver().catalog()
+        static_ids = [
+            str(row["canonical_id"])
+            for row in rows
+            if row.get("entity_type") != "composition"
+        ]
+        static = []
+        for offset in range(0, len(static_ids), 500):
+            static.extend(
+                await self._repo().find_static_entities_by_ids(static_ids[offset : offset + 500])
+            )
+        return CanonicalEntityCatalog.from_repository(rows, static)
+
     async def ask(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         if (
             request.mode == ChatMode.EXPERIMENTAL_LIVE
@@ -108,15 +128,27 @@ class AgentService:
         ):
             yield ChatEvent(type="error", message="实验实时模式默认关闭。")
             return
-        self._cancelled_sessions.discard(request.session_id)
+        product_mode = ProductMode(request.product_mode)
+        scope = session_scope(request.session_id, product_mode)
+        self._cancelled_sessions.discard(scope.session_id)
         started = perf_counter()
         yield ChatEvent(type="status", message="正在解析实体并规划检索…")
-        persisted_state = await self.load_game_state(request.session_id)
-        parsed_state = request.confirmed_game_state or GameStateParser().parse_text(request.text)
-        state = request.confirmed_game_state or _merge_game_state(persisted_state, parsed_state)
+        persisted_state = (
+            await self.load_game_state(scope.session_id) if scope.uses_game_state else GameState()
+        )
+        parsed_state = (
+            request.confirmed_game_state or GameStateParser().parse_text(request.text)
+            if scope.uses_game_state
+            else GameState(user_question=request.text)
+        )
+        state = (
+            request.confirmed_game_state or _merge_game_state(persisted_state, parsed_state)
+            if scope.uses_game_state
+            else parsed_state
+        )
         vision: DeepSeekVisionClient | None = None
         try:
-            if request.screenshot_path is not None:
+            if request.screenshot_path is not None and scope.accepts_screenshot:
                 vision = DeepSeekVisionClient(
                     self.settings.require_deepseek_api_key().get_secret_value(),
                     str(self.settings.deepseek_base_url), self.settings.vision_model,
@@ -130,7 +162,7 @@ class AgentService:
             entity_start = perf_counter()
             resolution = await self._resolver().resolve(request.text)
             understanding = understand_query(
-                request.text, state, ProductMode(request.product_mode), resolution
+                request.text, state, product_mode, resolution
             )
             if (
                 understanding.state_mutation == StateMutationIntent.RETAIN
@@ -152,7 +184,7 @@ class AgentService:
             plan_end = perf_counter()
             knowledge, calls = await self._retrieve(request.text, plan)
             retrieval_end = perf_counter()
-            history_rows = await self._repo().load_session_messages(request.session_id)
+            history_rows = await self._repo().load_session_messages(scope.session_id)
             history = _relevant_history(history_rows, understanding)
             gaps = context_gaps(state)
             context = AnswerContext(
@@ -178,13 +210,14 @@ class AgentService:
                 },
             )
             self.last_trace = trace
-            await self.save_game_state(request.session_id, state)
+            if scope.uses_game_state:
+                await self.save_game_state(scope.session_id, state)
             payload = trace.model_dump(mode="json")
             yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
                             context_gaps=[*gaps, *knowledge.knowledge_gaps])
             if understanding.kind == QueryKind.DETERMINISTIC_LOOKUP:
                 answer = _deterministic_answer(knowledge, self.settings.current_game_patch)
-                await self._record_answer(request, answer)
+                await self._record_answer(request, answer, scope.session_id)
                 yield ChatEvent(type="answer", message=answer.recommendation, response=answer,
                                 advice_options=_advice_options(answer), retrieval_plan=payload,
                                 context_gaps=gaps, llm_call_count=0)
@@ -198,7 +231,7 @@ class AgentService:
             trace.llm_call_count = 1
             trace.stage_latency_ms["llm"] = (perf_counter() - llm_started) * 1000
             self.last_trace = trace
-            await self._record_answer(request, outcome.response)
+            await self._record_answer(request, outcome.response, scope.session_id)
             yield ChatEvent(type="answer", message=outcome.response.recommendation,
                             response=outcome.response, advice_options=outcome.options,
                             retrieval_plan=trace.model_dump(mode="json"), context_gaps=gaps,
@@ -294,8 +327,10 @@ class AgentService:
         return RetrievedKnowledge(evidence=list(unique.values()),
                                   knowledge_gaps=list(dict.fromkeys(gaps))), calls
 
-    async def _record_answer(self, request: ChatRequest, answer: FinalResponse) -> None:
-        await self._repo().append_session_messages(request.session_id, [
+    async def _record_answer(
+        self, request: ChatRequest, answer: FinalResponse, session_id: str | None = None
+    ) -> None:
+        await self._repo().append_session_messages(session_id or request.session_id, [
             ("user", request.text), ("assistant", answer.recommendation),
         ])
 

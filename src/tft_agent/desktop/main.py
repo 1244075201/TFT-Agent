@@ -24,11 +24,8 @@ def main() -> None:
         from PySide6.QtWidgets import (
             QApplication,
             QFileDialog,
-            QFormLayout,
-            QGroupBox,
             QHBoxLayout,
             QLabel,
-            QLineEdit,
             QMainWindow,
             QMessageBox,
             QPushButton,
@@ -39,6 +36,9 @@ def main() -> None:
         )
     except ImportError as exc:
         raise SystemExit("桌面界面需要 PySide6 和 mss，请运行：uv sync --all-extras") from exc
+
+    from tft_agent.desktop.catalog import CanonicalEntityCatalog
+    from tft_agent.desktop.pages import ProductPages
 
     class AskWorker(QObject):
         chat_event = Signal(object)
@@ -97,7 +97,6 @@ def main() -> None:
             self.worker: AskWorker | None = None
             self.busy = False
             self.generated_capture: Path | None = None
-            self.product_mode = "match_guidance"
             self.setWindowTitle("云顶数据指导 Agent")
             self.resize(920, 720)
             root = QWidget()
@@ -113,26 +112,13 @@ def main() -> None:
                 data_status = f"DataTFT 状态读取失败：{exc}"
             self.state = QLabel(data_status)
             self.context = QLabel("当前局面：尚未记录")
-            modes = QHBoxLayout()
-            browse = QPushButton("阵容推荐")
-            guidance = QPushButton("对局指导")
-            modes.addWidget(browse)
-            modes.addWidget(guidance)
-            browse.clicked.connect(lambda: self.set_product_mode("comp_browser"))
-            guidance.clicked.connect(lambda: self.set_product_mode("match_guidance"))
-            state_box = QGroupBox("V0.5 GameState（逗号分隔列表）")
-            state_form = QFormLayout(state_box)
-            self.state_inputs: dict[str, QLineEdit] = {}
-            for key, label in (
-                ("comp_name", "目标阵容"), ("stage", "阶段"), ("level", "等级"),
-                ("gold", "金币"), ("hp", "生命"), ("augments", "已有强化"),
-                ("augment_choices", "强化三选一"), ("item_components", "散件"),
-                ("completed_items", "成装"), ("emblems", "转职"),
-                ("core_units", "关键棋子"), ("notes", "备注"),
-            ):
-                editor = QLineEdit()
-                self.state_inputs[key] = editor
-                state_form.addRow(label, editor)
+            try:
+                catalog = asyncio.run(self.service.entity_catalog())
+            except Exception:
+                catalog = CanonicalEntityCatalog([])
+            self.pages = ProductPages(catalog)
+            self.state_inputs = self.pages.state_inputs
+            self.pages.mode_changed.connect(self.set_product_mode)
             try:
                 saved_state = asyncio.run(self.service.load_game_state(self.session_id))
                 self.populate_game_state(saved_state)
@@ -154,8 +140,7 @@ def main() -> None:
             layout.addWidget(self.banner)
             layout.addWidget(self.state)
             layout.addWidget(self.context)
-            layout.addLayout(modes)
-            layout.addWidget(state_box)
+            layout.addWidget(self.pages)
             layout.addWidget(self.chat)
             layout.addWidget(self.input)
             layout.addLayout(buttons)
@@ -173,10 +158,12 @@ def main() -> None:
             self.timer.timeout.connect(self.poll_screen)
 
         def set_product_mode(self, mode: str) -> None:
-            self.product_mode = mode
             if mode == "comp_browser":
                 self.input.setPlainText("显示当前版本阵容列表")
                 self.state.setText("阵容推荐：版本阵容浏览 / 一图流")
+            elif mode == "general_guide":
+                self.input.clear()
+                self.state.setText("通用攻略：与当前对局状态及会话隔离")
             else:
                 self.input.clear()
                 self.state.setText("对局指导：结合当前 GameState 给出建议")
@@ -242,16 +229,18 @@ def main() -> None:
             self.busy = True
             self.chat.append(f"<b>你：</b>{text}")
             self.input.clear()
-            try:
-                edited_state = self.edited_game_state(text)
-            except ValueError as exc:
-                self.busy = False
-                self.state.setText(f"GameState 输入无效：{exc}")
-                return
+            edited_state = None
+            if self.pages.product_mode.value == "match_guidance":
+                try:
+                    edited_state = self.edited_game_state(text)
+                except ValueError as exc:
+                    self.busy = False
+                    self.state.setText(f"GameState 输入无效：{exc}")
+                    return
             request = ChatRequest(text=text, session_id=self.session_id,
                                   screenshot_path=self.screenshot,
                                   confirmed_game_state=edited_state,
-                                  product_mode=self.product_mode)
+                                  product_mode=self.pages.product_mode.value)
             self.screenshot = None
             self.worker_thread = QThread(self)
             self.worker = AskWorker(self.service, request)
@@ -306,7 +295,9 @@ def main() -> None:
                 self.state.setText(event.message)
 
         def clear_history(self) -> None:
-            asyncio.run(self.service.clear_session(self.session_id))
+            asyncio.run(
+                self.service.clear_product_session(self.session_id, self.pages.product_mode)
+            )
             self.chat.clear()
             self.context.setText("当前局面：尚未记录")
 

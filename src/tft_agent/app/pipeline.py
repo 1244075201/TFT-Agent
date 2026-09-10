@@ -19,6 +19,7 @@ class QueryKind(StrEnum):
 
 
 class ProductMode(StrEnum):
+    GENERAL_GUIDE = "general_guide"
     COMP_BROWSER = "comp_browser"
     MATCH_GUIDANCE = "match_guidance"
 

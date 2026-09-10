@@ -261,7 +261,9 @@ class ChatRequest(StrictModel):
     mode: ChatMode = ChatMode.COMPLIANT
     screenshot_path: Path | None = None
     confirmed_game_state: GameState | None = None
-    product_mode: Literal["comp_browser", "match_guidance"] = "match_guidance"
+    product_mode: Literal["general_guide", "comp_browser", "match_guidance"] = (
+        "match_guidance"
+    )
 
 
 class ChatEvent(StrictModel):

@@ -39,17 +39,20 @@ class CanonicalEntityResolver:
         self._catalog_ready = False
 
     async def resolve(self, query: str) -> EntityResolution:
-        if not self._catalog_ready:
+        catalog = await self.repository.canonical_catalog(
+            self.settings.current_game_patch, self.settings.current_set_number
+        )
+        if not self._catalog_ready and not catalog:
             await self.repository.rebuild_canonical_catalog(
                 self.settings.current_game_patch,
                 self.settings.current_set_number,
                 self.settings.current_set_name,
                 _explicit_aliases(),
             )
-            self._catalog_ready = True
-        catalog = await self.repository.canonical_catalog(
-            self.settings.current_game_patch, self.settings.current_set_number
-        )
+            catalog = await self.repository.canonical_catalog(
+                self.settings.current_game_patch, self.settings.current_set_number
+            )
+        self._catalog_ready = True
         normalized_query = _normalize(query)
         matches: dict[tuple[str, str], tuple[dict[str, object], str, str, float]] = {}
         # Exact canonical and aliases are checked before generic span matching.
@@ -87,6 +90,13 @@ class CanonicalEntityResolver:
                     score, entry, term = next(item for item in scored if item[0] == best)
                     _keep(matches, entry, term, "unique_fuzzy", score)
         return EntityResolution(entities=[_resolved(*value) for value in matches.values()])
+
+    async def catalog(self) -> list[dict[str, object]]:
+        if not self._catalog_ready:
+            await self.resolve("初始化当前版本实体目录")
+        return await self.repository.canonical_catalog(
+            self.settings.current_game_patch, self.settings.current_set_number
+        )
 
 
 def _unambiguous_spans(
