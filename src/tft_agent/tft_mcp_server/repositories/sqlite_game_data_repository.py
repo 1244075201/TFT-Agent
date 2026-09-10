@@ -573,7 +573,11 @@ class SQLiteGameDataRepository:
             static_params: list[object] = []
             if active_static_ids:
                 marks = ",".join("?" for _ in active_static_ids)
-                static_sql += f" WHERE entity_id IN ({marks})"
+                static_sql += (
+                    f" WHERE entity_id IN ({marks})"
+                    " OR (entity_id LIKE 'DA_Artifact_%' AND tags LIKE '%{44ace175}%')"
+                    " OR (entity_id LIKE 'DA_%' AND tags LIKE '%{6ef5c598}%')"
+                )
                 static_params.extend(active_static_ids)
             else:
                 # Compatibility bootstrap for databases synchronized before active-set metadata.
@@ -588,6 +592,8 @@ class SQLiteGameDataRepository:
                 marks = ",".join("?" for _ in registry_ids)
                 static_sql += (
                     " WHERE entity_id LIKE ? OR entity_id LIKE 'DA_Component_%'"
+                    " OR (entity_id LIKE 'DA_Artifact_%' AND tags LIKE '%{44ace175}%')"
+                    " OR (entity_id LIKE 'DA_%' AND tags LIKE '%{6ef5c598}%')"
                     + (f" OR entity_id IN ({marks})" if marks else "")
                 )
                 static_params.append(f"DA%{set_number}%")

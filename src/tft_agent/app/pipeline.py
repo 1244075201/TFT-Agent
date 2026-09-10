@@ -456,7 +456,8 @@ def context_gaps(state: GameState) -> list[str]:
     values = {"target_comp": state.comp_name, "stage": state.stage, "level": state.level,
               "gold": state.gold, "hp": state.hp, "augments": state.augments,
               "augment_choices": state.augment_choices, "components": state.item_components,
-              "completed_items": state.completed_items, "emblems": state.emblems,
+              "completed_items": state.completed_items, "artifacts": state.artifacts,
+              "radiant_items": state.radiant_items, "emblems": state.emblems,
               "key_units": state.core_units, "notes": state.notes}
     return [key for key, value in values.items() if value is None or value == [] or value == ""]
 

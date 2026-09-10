@@ -20,6 +20,7 @@ class EntityOption(StrictModel):
     tags: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=list)
     icon_ref: str | None = None
+    item_category: str | None = None
 
 
 class CompositionCard(StrictModel):
@@ -50,6 +51,7 @@ class CanonicalEntityCatalog:
             tags = [str(value) for value in getattr(detail, "tags", [])]
             if canonical_id.casefold().startswith("da_component_"):
                 tags.append("component")
+            item_category = _item_category(tags, getattr(detail, "components", []))
             options.append(EntityOption(
                 canonical_id=canonical_id,
                 display_name=str(row["display_name"]),
@@ -61,6 +63,7 @@ class CanonicalEntityCatalog:
                     for value in getattr(detail, "components", [])
                     if str(value) in names
                 ],
+                item_category=item_category,
             ))
         return cls(options)
 
@@ -102,11 +105,45 @@ class CanonicalEntityCatalog:
 
 
 def is_component(option: EntityOption) -> bool:
-    return "component" in {tag.casefold() for tag in option.tags}
+    return option.item_category == "component" or "component" in {
+        tag.casefold() for tag in option.tags
+    }
 
 
 def is_completed_item(option: EntityOption) -> bool:
-    return not is_component(option) and bool(option.components)
+    return (
+        option.item_category == "completed"
+        or option.item_category is None
+        and not is_component(option)
+        and not is_artifact(option)
+        and not is_radiant_item(option)
+        and bool(option.components)
+    )
+
+
+def is_artifact(option: EntityOption) -> bool:
+    return option.item_category == "artifact" or "{44ace175}" in {
+        tag.casefold() for tag in option.tags
+    }
+
+
+def is_radiant_item(option: EntityOption) -> bool:
+    return option.item_category == "radiant" or "{6ef5c598}" in {
+        tag.casefold() for tag in option.tags
+    }
+
+
+def _item_category(tags: list[str], components: object) -> str | None:
+    folded_tags = {tag.casefold() for tag in tags}
+    if "{44ace175}" in folded_tags:
+        return "artifact"
+    if "{6ef5c598}" in folded_tags:
+        return "radiant"
+    if "component" in folded_tags:
+        return "component"
+    if components:
+        return "completed"
+    return None
 
 
 def search_match_reason(option: Any, query: str) -> str:

@@ -81,6 +81,8 @@ class GameState(StrictModel):
     items: list[str] = Field(default_factory=list)
     item_components: list[str] = Field(default_factory=list)
     completed_items: list[str] = Field(default_factory=list)
+    artifacts: list[str] = Field(default_factory=list)
+    radiant_items: list[str] = Field(default_factory=list)
     traits: list[TraitState] = Field(default_factory=list)
     augments: list[str] = Field(default_factory=list)
     augment_choices: list[str] = Field(default_factory=list, max_length=3)
@@ -97,8 +99,8 @@ class GameState(StrictModel):
     user_question: str | None = None
 
     @field_validator(
-        "items", "item_components", "completed_items", "augments", "augment_choices",
-        "emblems", "special_components", "core_units"
+        "items", "item_components", "completed_items", "artifacts", "radiant_items",
+        "augments", "augment_choices", "emblems", "special_components", "core_units"
     )
     @classmethod
     def validate_named_facts(cls, value: list[str]) -> list[str]:

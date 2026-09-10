@@ -139,3 +139,15 @@ async def test_general_guide_does_not_read_or_overwrite_match_state(tmp_path: Pa
     assert await service.load_game_state("desktop:general-guide") == GameState()
     assert await service._repo().load_session_messages("desktop") == []
     assert await service._repo().load_session_messages("desktop:general-guide")
+
+
+@pytest.mark.asyncio
+async def test_match_inventory_categories_persist_without_schema_migration(tmp_path: Path) -> None:
+    service = AgentService(Settings(database_path=tmp_path / "inventory.sqlite3"))
+    state = GameState(
+        item_components=["反曲之弓"], completed_items=["朔极之矛"],
+        artifacts=["死亡之蔑"], radiant_items=["光明版蓝霸符"],
+        emblems=["神谕者纹章"],
+    )
+    await service.save_game_state("desktop-match", state)
+    assert await service.load_game_state("desktop-match") == state

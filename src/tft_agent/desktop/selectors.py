@@ -29,6 +29,8 @@ class EntitySelectorModel:
         *,
         multiple: bool = False,
         count_duplicates: bool = False,
+        search_placeholder: str = "搜索名称或别名…",
+        selection_label: str = "已添加：",
         predicate: Callable[[EntityOption], bool] | None = None,
     ) -> None:
         self.catalog = catalog
@@ -36,6 +38,8 @@ class EntitySelectorModel:
         self.multiple = multiple
         self.count_duplicates = count_duplicates
         self.predicate = predicate
+        self.search_placeholder = search_placeholder
+        self.selection_label = selection_label
         self.selected: list[SelectedEntity] = []
 
     def suggestions(self, query: str, limit: int = 30) -> list[EntityOption]:
@@ -81,6 +85,25 @@ class EntitySelectorModel:
     def display_values(self) -> list[str]:
         return [item.display_name for item in self.selected for _ in range(item.quantity)]
 
+    def set_display_values(self, values: Iterable[str]) -> None:
+        self.clear()
+        for name in values:
+            match = next(
+                (item for item in self.suggestions(name) if item.display_name == name), None
+            )
+            if match is not None:
+                self.select(match)
+                continue
+            entity_type = next(iter(self.entity_types), "unknown")
+            existing = next((item for item in self.selected if item.display_name == name), None)
+            if existing is not None and self.count_duplicates:
+                existing.quantity += 1
+            elif existing is None:
+                self.selected.append(SelectedEntity(
+                    canonical_id=f"legacy:{entity_type}:{name}", display_name=name,
+                    entity_type=entity_type,
+                ))
+
 
 class AugmentChoiceModel:
     """Stable three-slot augment selection with cross-slot deduplication."""
@@ -108,8 +131,16 @@ class AugmentChoiceModel:
 
 def searchable_selector_class() -> Any:
     """Build the Qt widget lazily so model tests never require a GUI runtime."""
-    from PySide6.QtCore import QStringListModel, Qt, Signal
-    from PySide6.QtWidgets import QCompleter, QHBoxLayout, QLineEdit, QPushButton, QWidget
+    from PySide6.QtCore import QModelIndex, Signal
+    from PySide6.QtWidgets import (
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QListWidget,
+        QPushButton,
+        QVBoxLayout,
+        QWidget,
+    )
 
     class SearchableEntitySelector(QWidget):
         values_changed = Signal()
@@ -118,36 +149,46 @@ def searchable_selector_class() -> Any:
             super().__init__()
             self.model = model
             self.search = QLineEdit()
-            self.search.setPlaceholderText("搜索名称或别名…")
+            self.search.setPlaceholderText(model.search_placeholder)
+            self.candidates = QListWidget()
+            self.candidates.setMaximumHeight(112)
+            self.candidates.hide()
             self.chips = QWidget()
             self.chips_layout = QHBoxLayout(self.chips)
             self.chips_layout.setContentsMargins(0, 0, 0, 0)
-            self.completion_model = QStringListModel()
-            self.completion_options: dict[str, EntityOption] = {}
-            self.completer = QCompleter(self.completion_model, self)
-            self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-            self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
-            self.search.setCompleter(self.completer)
-            layout = QHBoxLayout(self)
+            self.selected_label = QLabel(model.selection_label)
+            selected_row = QHBoxLayout()
+            selected_row.setContentsMargins(0, 0, 0, 0)
+            selected_row.addWidget(self.selected_label)
+            selected_row.addWidget(self.chips, 1)
+            layout = QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(self.chips)
             layout.addWidget(self.search)
-            self.search.textChanged.connect(self._refresh)
-            self.completer.activated.connect(self._activate)
-            self._refresh("")
+            layout.addWidget(self.candidates)
+            layout.addLayout(selected_row)
+            self.search.textEdited.connect(self._refresh)
+            self.candidates.clicked.connect(self._activate)
+            self.candidates.activated.connect(self._activate)
+            self._candidate_options: list[EntityOption] = []
+            self._render_chips()
 
         def _refresh(self, query: str) -> None:
-            self.completion_options = {
-                f"{option.display_name}　·　{search_match_reason(option, query)}": option
-                for option in self.model.suggestions(query)
-            }
-            self.completion_model.setStringList(list(self.completion_options))
+            self.candidates.clear()
+            self._candidate_options = self.model.suggestions(query) if query.strip() else []
+            for option in self._candidate_options:
+                self.candidates.addItem(
+                    f"{option.display_name}　·　{search_match_reason(option, query)}"
+                )
+            self.candidates.setVisible(bool(self._candidate_options))
 
-        def _activate(self, label: str) -> None:
-            option = self.completion_options[label]
+        def _activate(self, index: QModelIndex) -> None:
+            option = self._candidate_options[index.row()]
             self.model.select(option)
             self._render_chips()
             self.search.clear()
+            self.candidates.clear()
+            self.candidates.hide()
+            self._candidate_options.clear()
             self.values_changed.emit()
 
         def _render_chips(self) -> None:
@@ -159,7 +200,6 @@ def searchable_selector_class() -> Any:
             for option in self.model.selected:
                 quantity = f" ×{option.quantity}" if option.quantity > 1 else ""
                 chip = QPushButton(f"{option.display_name}{quantity} ×")
-                chip.setToolTip(option.entity_type)
                 chip.clicked.connect(
                     lambda _checked=False, identifier=option.canonical_id:
                     self._remove(identifier)
@@ -174,25 +214,15 @@ def searchable_selector_class() -> Any:
             self.values_changed.emit()
 
         def text(self) -> str:
-            selected = self.model.display_values()
-            return "，".join(selected) if selected else self.search.text()
+            return "，".join(self.model.display_values())
 
         def setText(self, value: str) -> None:
-            self.model.clear()
-            unresolved: list[str] = []
-            for name in (item.strip() for item in value.replace("，", ",").split(",")):
-                if not name:
-                    continue
-                match = next(
-                    (item for item in self.model.suggestions(name) if item.display_name == name),
-                    None,
-                )
-                if match is not None:
-                    self.model.select(match)
-                else:
-                    unresolved.append(name)
+            values = [item.strip() for item in value.replace("，", ",").split(",")
+                      if item.strip()]
+            self.model.set_display_values(values)
             self._render_chips()
-            self.search.setText("，".join(unresolved))
+            self.search.clear()
+            self.candidates.hide()
 
         def clear(self) -> None:
             self.model.clear()
