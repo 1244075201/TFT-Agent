@@ -57,7 +57,7 @@ class ConversationSubject(StrictModel):
     canonical_id: str
     entity_type: str
     display_name: str
-    source_turn_offset: int = Field(ge=1)
+    source_turn_offset: int = Field(ge=0)
 
 
 class ChampionCompositionMatch(StrictModel):
@@ -146,6 +146,10 @@ class RetrievalTrace(StrictModel):
     inheritance_reason: str | None = None
     champion_candidates: list[ChampionCompositionMatch] = Field(default_factory=list)
     final_resolution_category: ResolutionCategory = ResolutionCategory.RESOLVED_STRATEGY
+    explicit_entity_attempt: str | None = None
+    explicit_unresolved_term: str | None = None
+    inheritance_blocked_reason: str | None = None
+    conversation_reset: bool = False
 
 
 class AnswerContext(StrictModel):
@@ -231,21 +235,18 @@ def understand_query(
     else:
         intent = DecisionIntent.GENERAL_STRATEGY
     unresolved = list(resolution.unresolved_terms) if resolution else []
-    if re.search(r"怎么玩|攻略", text):
-        term = re.split(r"怎么玩|攻略", text, maxsplit=1)[0].strip(" ，,。！？!?")
+    term = explicit_entity_attempt(text)
+    if term:
         normalized_term = EntityTextNormalizer.normalize(term)
         exact_target = any(
-            normalized_term in {
+            item.entity_type in {"champion", "composition"}
+            and normalized_term in {
                 EntityTextNormalizer.normalize(item.matched_alias),
                 EntityTextNormalizer.normalize(item.display_name),
             }
             for item in entities
         )
-        if (
-            term
-            and term not in {"这套阵容", "这个阵容", "阵容", "这套"}
-            and not exact_target
-        ):
+        if not exact_target:
             unresolved.append(term)
     knowledge_intent = (KnowledgeIntent.GENERAL_KNOWLEDGE if general_knowledge else
                         KnowledgeIntent.COMPOSITION_BROWSE if browse else
@@ -275,6 +276,27 @@ def understand_query(
 def is_global_browse_query(text: str, mode: ProductMode = ProductMode.GENERAL_GUIDE) -> bool:
     lowered = text.casefold()
     return mode == ProductMode.COMP_BROWSER or any(term in lowered for term in _BROWSE_TERMS)
+
+
+def explicit_entity_attempt(text: str) -> str | None:
+    """Extract an explicitly named strategy subject without treating follow-ups as entities."""
+    stripped = text.strip(" ，,。！？!?")
+    patterns = (
+        r"^(?:我想玩|我想要玩|想玩|玩)(?P<term>.+?)(?:怎么玩|怎么运营|如何运营|"
+        r"出什么(?:装备)?|怎么出(?:装)?|攻略|玩法)?$",
+        r"^(?P<term>.+?)(?:怎么玩|怎么运营|如何运营|出什么(?:装备)?|怎么出(?:装)?|"
+        r"攻略|玩法)$",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, stripped)
+        if not match:
+            continue
+        term = match.group("term").strip(" ，,。！？!?")
+        if term and term not in {
+            "那", "这个", "这个阵容", "这套", "这套阵容", "它", "阵容",
+        }:
+            return term
+    return None
 
 
 def is_topic_compatible_query(text: str) -> bool:

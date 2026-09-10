@@ -104,6 +104,9 @@ class DesktopMainWindow(QMainWindow):
         self.guide_page.send_requested.connect(lambda text: self._send("guide", text))
         self.match_page.send_requested.connect(lambda text: self._send("match", text))
         self.guide_page.cancel_requested.connect(self.controller.cancel)
+        self.guide_page.new_conversation_requested.connect(
+            self._new_guide_conversation
+        )
         self.match_page.cancel_requested.connect(self.controller.cancel)
         self.match_page.save_requested.connect(self._save_state)
         self.match_page.clear_requested.connect(self._clear_state)
@@ -175,3 +178,10 @@ class DesktopMainWindow(QMainWindow):
                 "desktop-match", ProductMode.MATCH_GUIDANCE
             ))
             self.match_page.chat.clear_history()
+
+    def _new_guide_conversation(self) -> None:
+        if self.controller.busy:
+            self.guide_page.chat.status.setText("请先等待当前回答完成或取消请求。")
+            return
+        asyncio.run(self.service.clear_general_guide_conversation("desktop-guide"))
+        self.guide_page.chat.clear_history()

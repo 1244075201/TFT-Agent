@@ -84,3 +84,6 @@ class ChatPanel(QWidget):
 
     def clear_history(self) -> None:
         self.transcript.clear()
+        self.input.clear()
+        self.status.setText("就绪")
+        self.status.setToolTip("")

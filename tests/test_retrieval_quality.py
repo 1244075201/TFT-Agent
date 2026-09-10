@@ -415,6 +415,97 @@ async def test_general_guide_conversational_subject_precedence(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("first_query", "second_query", "attempt", "forbidden"),
+    [
+        ("螳螂怎么玩", "地狱火怎么玩", "地狱火", ["卡兹克"]),
+        ("狮子狗怎么玩", "地狱火怎么玩", "地狱火", ["雷恩加尔", "重装狮子狗"]),
+        ("德莱文95怎么玩", "XXXXX怎么玩", "XXXXX", ["德莱文95"]),
+    ],
+)
+async def test_explicit_unresolved_entity_blocks_subject_inheritance(
+    retrieval_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    first_query: str,
+    second_query: str,
+    attempt: str,
+    forbidden: list[str],
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    await _ask_general(service, first_query, "explicit-unresolved")
+    events = await _ask_general(service, second_query, "explicit-unresolved")
+    trace = _trace(service)
+
+    assert trace.explicit_entity_attempt == attempt
+    assert trace.explicit_unresolved_term == attempt
+    assert trace.subject_inherited is False
+    assert trace.inheritance_blocked_reason == "explicit_unresolved_entity_attempt"
+    assert trace.conversational_subject is None
+    assert trace.final_resolution_category.value == "unresolved_entity"
+    answer = next(event.message for event in events if event.type == "answer")
+    assert all(value not in answer for value in forbidden)
+
+
+@pytest.mark.asyncio
+async def test_explicit_new_entity_replaces_previous_subject_even_without_coverage(
+    retrieval_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    await _ask_general(service, "螳螂怎么玩", "explicit-replacement")
+    await _ask_general(service, "我想玩婕拉怎么运营", "explicit-replacement")
+    trace = _trace(service)
+
+    champion = next(item for item in trace.explicit_entities
+                    if item.entity_type == "champion")
+    assert champion.display_name == "婕拉"
+    assert trace.subject_inherited is False
+    assert trace.inheritance_blocked_reason == "current_explicit_resolved_entity"
+    assert trace.conversational_subject is not None
+    assert trace.conversational_subject.display_name == "婕拉"
+    assert trace.final_resolution_category.value != "unresolved_entity"
+
+
+@pytest.mark.asyncio
+async def test_new_general_guide_conversation_clears_only_guide_scope(
+    retrieval_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    match_state = GameState(comp_name="森林天使", stage="4-1", hp=40)
+    await service.save_game_state("desktop-match", match_state)
+    await service._repo().append_session_messages(
+        "desktop-match", [("user", "本局怎么运营"), ("assistant", "保留这条对局记录")]
+    )
+
+    await _ask_general(service, "德莱文95怎么玩", "desktop-guide")
+    await _ask_general(service, "神器怎么选", "desktop-guide")
+    before = _trace(service)
+    assert before.subject_inherited is True
+    assert before.understanding.target_comp is not None
+    assert before.understanding.target_comp.display_name == "德莱文95"
+
+    await service.clear_general_guide_conversation("desktop-guide")
+    assert await service._repo().load_session_messages(
+        "desktop-guide:general-guide"
+    ) == []
+    events = await _ask_general(service, "神器怎么选", "desktop-guide")
+    after = _trace(service)
+    assert after.conversation_reset is True
+    assert after.conversational_subject is None
+    assert after.subject_inherited is False
+    assert after.injected_history == []
+    assert after.understanding.target_comp is None
+    assert all("德莱文95" not in event.message for event in events)
+
+    assert await service.load_game_state("desktop-match") == match_state
+    assert await service._repo().load_session_messages("desktop-match") == [
+        ("user", "本局怎么运营"), ("assistant", "保留这条对局记录")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("query", "entity_type", "canonical_id", "target", "category"),
     [
         ("狮子狗怎么玩", "champion", "DA_18_Rengar", "重装狮子狗", "resolved_strategy"),

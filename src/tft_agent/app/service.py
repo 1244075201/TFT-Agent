@@ -29,6 +29,7 @@ from tft_agent.app.pipeline import (
     build_retrieval_plan,
     comp_evidence,
     context_gaps,
+    explicit_entity_attempt,
     is_global_browse_query,
     is_topic_compatible_query,
     static_evidence,
@@ -60,6 +61,7 @@ class AgentService:
         self._cancelled_sessions: set[str] = set()
         self._repository: SQLiteGameDataRepository | None = None
         self._entity_resolver: CanonicalEntityResolver | None = None
+        self._general_guide_resets: set[str] = set()
         self.last_trace: RetrievalTrace | None = None
 
     def _repo(self) -> SQLiteGameDataRepository:
@@ -91,7 +93,13 @@ class AgentService:
         await self._repo().clear_session(session_id)
 
     async def clear_product_session(self, session_id: str, product_mode: ProductMode) -> None:
-        await self._repo().clear_session(session_scope(session_id, product_mode).session_id)
+        scope = session_scope(session_id, product_mode)
+        await self._repo().clear_session(scope.session_id)
+        if product_mode == ProductMode.GENERAL_GUIDE:
+            self._general_guide_resets.add(scope.session_id)
+
+    async def clear_general_guide_conversation(self, session_id: str) -> None:
+        await self.clear_product_session(session_id, ProductMode.GENERAL_GUIDE)
 
     async def session_summary(self, session_id: str) -> str:
         state = await self.load_game_state(session_id)
@@ -150,6 +158,7 @@ class AgentService:
             return
         product_mode = ProductMode(request.product_mode)
         scope = session_scope(request.session_id, product_mode)
+        conversation_reset = scope.session_id in self._general_guide_resets
         self._cancelled_sessions.discard(scope.session_id)
         started = perf_counter()
         yield ChatEvent(type="status", message="正在解析实体并规划检索…")
@@ -187,13 +196,24 @@ class AgentService:
             entity_start = perf_counter()
             resolution = await self._resolver().resolve(request.text)
             explicit_entities = list(resolution.entities)
+            entity_attempt = explicit_entity_attempt(request.text)
             subject_inherited = False
             inheritance_reason: str | None = None
+            inheritance_blocked_reason: str | None = None
             explicit_subjects = [item for item in resolution.entities
                                  if item.entity_type in {"composition", "champion"}]
+            unresolved_attempt = (
+                entity_attempt
+                if entity_attempt
+                and not _strategy_subject_attempt_resolved(
+                    entity_attempt, resolution.entities
+                )
+                else None
+            )
             if (
                 conversational_subject
                 and not explicit_subjects
+                and unresolved_attempt is None
                 and not is_global_browse_query(request.text, product_mode)
                 and is_topic_compatible_query(request.text)
             ):
@@ -213,6 +233,18 @@ class AgentService:
                 )
                 subject_inherited = True
                 inheritance_reason = "compatible_followup_without_explicit_subject"
+            elif unresolved_attempt:
+                inheritance_blocked_reason = "explicit_unresolved_entity_attempt"
+            elif explicit_subjects:
+                inheritance_blocked_reason = "current_explicit_resolved_entity"
+            elif is_global_browse_query(request.text, product_mode):
+                inheritance_blocked_reason = "current_global_browse_intent"
+            elif conversational_subject:
+                inheritance_blocked_reason = "query_not_topic_compatible"
+            effective_subject = (
+                _conversation_subject_from_entities(explicit_subjects)
+                or (conversational_subject if subject_inherited else None)
+            )
             resolved_comps = [
                 item for item in resolution.entities if item.entity_type == "composition"
             ]
@@ -273,11 +305,15 @@ class AgentService:
                 persisted_state_before=persisted_state, parsed_state=parsed_state,
                 game_state_after_merge=state, injected_history=history,
                 explicit_entities=explicit_entities,
-                conversational_subject=conversational_subject,
+                conversational_subject=effective_subject,
                 subject_inherited=subject_inherited,
                 inheritance_reason=inheritance_reason,
                 champion_candidates=champion_matches,
                 final_resolution_category=understanding.resolution_category,
+                explicit_entity_attempt=entity_attempt,
+                explicit_unresolved_term=unresolved_attempt,
+                inheritance_blocked_reason=inheritance_blocked_reason,
+                conversation_reset=conversation_reset,
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -287,6 +323,7 @@ class AgentService:
                 },
             )
             self.last_trace = trace
+            self._general_guide_resets.discard(scope.session_id)
             if scope.uses_game_state:
                 await self.save_game_state(scope.session_id, state)
             payload = trace.model_dump(mode="json")
@@ -560,6 +597,36 @@ def _apply_champion_strategy_route(
 
 def _normalized(value: str) -> str:
     return EntityTextNormalizer.normalize(value)
+
+
+def _strategy_subject_attempt_resolved(
+    term: str, entities: list[ResolvedEntity]
+) -> bool:
+    normalized = _normalized(term)
+    return any(
+        item.entity_type in {"champion", "composition"}
+        and normalized in {
+            _normalized(item.display_name), _normalized(item.matched_alias),
+        }
+        for item in entities
+    )
+
+
+def _conversation_subject_from_entities(
+    entities: list[ResolvedEntity],
+) -> ConversationSubject | None:
+    compositions = [item for item in entities if item.entity_type == "composition"]
+    selected = compositions[0] if len(compositions) == 1 else (
+        entities[0] if len(entities) == 1 else None
+    )
+    if selected is None:
+        return None
+    return ConversationSubject(
+        canonical_id=selected.canonical_id,
+        entity_type=selected.entity_type,
+        display_name=selected.display_name,
+        source_turn_offset=0,
+    )
 
 
 def _recommended_item_owner(value: str) -> str:

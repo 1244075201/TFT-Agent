@@ -49,10 +49,15 @@ class CompositionBrowser(QWidget):
 class GuideChatPage(QWidget):
     send_requested = Signal(str)
     cancel_requested = Signal()
+    new_conversation_requested = Signal()
 
     def __init__(self, patch: str, cards: list[CompositionCard]) -> None:
         super().__init__()
         title = QLabel(f"<h2>攻略问答</h2>查询阵容、装备、强化、转职和一般运营知识　Patch {patch}")
+        self.new_conversation = QPushButton("新对话")
+        header = QHBoxLayout()
+        header.addWidget(title, 1)
+        header.addWidget(self.new_conversation)
         shortcuts = QHBoxLayout()
         for label, question in (
             ("当前版本阵容推荐", "当前版本有哪些强势阵容？"),
@@ -67,13 +72,14 @@ class GuideChatPage(QWidget):
         self.browser = CompositionBrowser(cards)
         self.chat = ChatPanel("输入攻略问题；Enter 发送，Shift+Enter 换行")
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.addLayout(header)
         layout.addLayout(shortcuts)
         layout.addWidget(self.browser)
         layout.addWidget(self.chat, 1)
         self.browser.question_requested.connect(self._send_question)
         self.chat.send_requested.connect(self.send_requested.emit)
         self.chat.cancel_requested.connect(self.cancel_requested.emit)
+        self.new_conversation.clicked.connect(self.new_conversation_requested.emit)
 
     def _send_question(self, question: str) -> None:
         self.chat.input.setPlainText(question)
