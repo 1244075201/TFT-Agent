@@ -84,4 +84,3 @@ class ChatPanel(QWidget):
 
     def clear_history(self) -> None:
         self.transcript.clear()
-
