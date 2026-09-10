@@ -8,14 +8,19 @@ from time import perf_counter
 
 from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.state import AgentMessage, AgentState
+from tft_agent.app.aliases import EntityTextNormalizer
 from tft_agent.app.entity_resolution import CanonicalEntityResolver, ResolvedEntity
 from tft_agent.app.pipeline import (
     AnswerContext,
+    ChampionCompositionMatch,
+    ConversationSubject,
+    DecisionIntent,
     EvidenceRecord,
     ProductMode,
     QueryKind,
     QueryStateUnderstanding,
     RepositoryCall,
+    ResolutionCategory,
     RetrievalPlan,
     RetrievalTrace,
     RetrievedKnowledge,
@@ -24,6 +29,8 @@ from tft_agent.app.pipeline import (
     build_retrieval_plan,
     comp_evidence,
     context_gaps,
+    is_global_browse_query,
+    is_topic_compatible_query,
     static_evidence,
     understand_query,
 )
@@ -159,6 +166,11 @@ class AgentService:
             if scope.uses_game_state
             else parsed_state
         )
+        history_rows = await self._repo().load_session_messages(scope.session_id)
+        conversational_subject = (
+            await self._conversation_subject(history_rows)
+            if product_mode == ProductMode.GENERAL_GUIDE else None
+        )
         vision: DeepSeekVisionClient | None = None
         try:
             if request.screenshot_path is not None and scope.accepts_screenshot:
@@ -174,6 +186,33 @@ class AgentService:
                 yield ChatEvent(type="observation", message="截图识别完成", game_state=state)
             entity_start = perf_counter()
             resolution = await self._resolver().resolve(request.text)
+            explicit_entities = list(resolution.entities)
+            subject_inherited = False
+            inheritance_reason: str | None = None
+            explicit_subjects = [item for item in resolution.entities
+                                 if item.entity_type in {"composition", "champion"}]
+            if (
+                conversational_subject
+                and not explicit_subjects
+                and not is_global_browse_query(request.text, product_mode)
+                and is_topic_compatible_query(request.text)
+            ):
+                inherited = ResolvedEntity(
+                    canonical_id=conversational_subject.canonical_id,
+                    entity_type=conversational_subject.entity_type,
+                    display_name=conversational_subject.display_name,
+                    game_patch=self.settings.current_game_patch,
+                    set_number=self.settings.current_set_number,
+                    set_name=self.settings.current_set_name,
+                    matched_alias=conversational_subject.display_name,
+                    match_kind="conversational_subject",
+                    match_score=1.0,
+                )
+                resolution = resolution.model_copy(
+                    update={"entities": [*resolution.entities, inherited]}
+                )
+                subject_inherited = True
+                inheritance_reason = "compatible_followup_without_explicit_subject"
             resolved_comps = [
                 item for item in resolution.entities if item.entity_type == "composition"
             ]
@@ -192,6 +231,10 @@ class AgentService:
             understanding = understand_query(
                 request.text, state, product_mode, resolution
             )
+            champion_matches, champion_calls = await self._champion_composition_matches(
+                resolution.entities
+            )
+            understanding = _apply_champion_strategy_route(understanding, champion_matches)
             if (
                 understanding.state_mutation == StateMutationIntent.RETAIN
                 and state.comp_name
@@ -211,8 +254,8 @@ class AgentService:
             )
             plan_end = perf_counter()
             knowledge, calls = await self._retrieve(request.text, plan)
+            calls = [*champion_calls, *calls]
             retrieval_end = perf_counter()
-            history_rows = await self._repo().load_session_messages(scope.session_id)
             history = _relevant_history(history_rows, understanding)
             gaps = context_gaps(state) if scope.uses_game_state else []
             context = AnswerContext(
@@ -229,6 +272,12 @@ class AgentService:
                 clean_context_summary=context_summary, llm_call_count=0,
                 persisted_state_before=persisted_state, parsed_state=parsed_state,
                 game_state_after_merge=state, injected_history=history,
+                explicit_entities=explicit_entities,
+                conversational_subject=conversational_subject,
+                subject_inherited=subject_inherited,
+                inheritance_reason=inheritance_reason,
+                champion_candidates=champion_matches,
+                final_resolution_category=understanding.resolution_category,
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -243,7 +292,11 @@ class AgentService:
             payload = trace.model_dump(mode="json")
             yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
                             context_gaps=[*gaps, *knowledge.knowledge_gaps])
-            if understanding.kind == QueryKind.DETERMINISTIC_LOOKUP:
+            if (
+                understanding.kind == QueryKind.DETERMINISTIC_LOOKUP
+                or understanding.resolution_category
+                == ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE
+            ):
                 answer = _deterministic_answer(
                     knowledge, self.settings.current_game_patch, understanding, plan
                 )
@@ -273,6 +326,98 @@ class AgentService:
         finally:
             if vision is not None:
                 await vision.close()
+
+    async def _conversation_subject(
+        self, rows: list[tuple[str, str]]
+    ) -> ConversationSubject | None:
+        user_turns = [content for role, content in rows[-8:] if role == "user"]
+        for offset, content in enumerate(reversed(user_turns), start=1):
+            if is_global_browse_query(content):
+                return None
+            resolution = await self._resolver().resolve(content)
+            subjects = [item for item in resolution.entities
+                        if item.entity_type in {"composition", "champion"}]
+            compositions = [item for item in subjects if item.entity_type == "composition"]
+            selected = compositions[0] if len(compositions) == 1 else (
+                subjects[0] if len(subjects) == 1 else None
+            )
+            if selected:
+                return ConversationSubject(
+                    canonical_id=selected.canonical_id,
+                    entity_type=selected.entity_type,
+                    display_name=selected.display_name,
+                    source_turn_offset=offset,
+                )
+        return None
+
+    async def _champion_composition_matches(
+        self, entities: list[ResolvedEntity]
+    ) -> tuple[list[ChampionCompositionMatch], list[RepositoryCall]]:
+        champions = [item for item in entities if item.entity_type == "champion"]
+        if not champions:
+            return [], []
+        started = perf_counter()
+        comps = await self._repo().search_comps(
+            None, self.settings.current_game_patch, limit=50
+        )
+        catalog = await self._resolver().catalog()
+        catalog_terms: dict[str, set[str]] = {}
+        for row in catalog:
+            if row["entity_type"] != "champion":
+                continue
+            aliases = row["aliases"]
+            alias_values = aliases if isinstance(aliases, list) else []
+            catalog_terms[str(row["canonical_id"])] = {
+                _normalized(str(row["display_name"])),
+                *(_normalized(str(alias)) for alias in alias_values),
+            }
+        matches: list[ChampionCompositionMatch] = []
+        for champion in champions:
+            identity_terms = catalog_terms.get(champion.canonical_id, {
+                _normalized(champion.display_name), _normalized(champion.matched_alias),
+            })
+            for comp in comps:
+                sources: list[str] = []
+                if champion.display_name in comp.core_units:
+                    sources.append("core_units")
+                if any(
+                    _recommended_item_owner(value) == champion.display_name
+                    for value in comp.recommended_items
+                ):
+                    sources.append("recommended_item_owner")
+                if _normalized(comp.name) in identity_terms:
+                    sources.append("exact_composition_title_identity")
+                if not sources:
+                    continue
+                matches.append(ChampionCompositionMatch(
+                    champion_id=champion.canonical_id,
+                    champion_name=champion.display_name,
+                    composition=ResolvedEntity(
+                        canonical_id=comp.comp_id,
+                        entity_type="composition",
+                        display_name=comp.name,
+                        game_patch=self.settings.current_game_patch,
+                        set_number=self.settings.current_set_number,
+                        set_name=self.settings.current_set_name,
+                        matched_alias=comp.name,
+                        match_kind="structured_champion_bridge",
+                        match_score=1.0,
+                    ),
+                    confidence="high",
+                    sources=sources,
+                ))
+        call = RepositoryCall(
+            operation="find_compositions_by_champion_signals",
+            filters={
+                "champion_ids": [item.canonical_id for item in champions],
+                "game_patch": self.settings.current_game_patch,
+                "signals": ["core_units", "recommended_item_owner",
+                            "exact_composition_title_identity"],
+            },
+            result_count=len(matches),
+            latency_ms=(perf_counter() - started) * 1000,
+        )
+        return matches, [call]
 
     async def _retrieve(
         self, question: str, plan: RetrievalPlan
@@ -375,6 +520,56 @@ def _merge_game_state(previous: GameState, current: GameState) -> GameState:
     return previous.model_copy(update=update)
 
 
+def _apply_champion_strategy_route(
+    understanding: QueryStateUnderstanding,
+    matches: list[ChampionCompositionMatch],
+) -> QueryStateUnderstanding:
+    champions = [item for item in understanding.resolved_entities
+                 if item.entity_type == "champion"]
+    if not champions:
+        return understanding
+    if understanding.target_comp:
+        return understanding.model_copy(
+            update={"resolution_category": ResolutionCategory.RESOLVED_STRATEGY}
+        )
+    champion_ids = {item.canonical_id for item in champions}
+    unique: dict[str, ResolvedEntity] = {}
+    for match in matches:
+        if match.champion_id in champion_ids and match.confidence == "high":
+            unique[match.composition.canonical_id] = match.composition
+    candidates = list(unique.values())
+    if len(candidates) == 1:
+        return understanding.model_copy(update={
+            "target_comp": candidates[0],
+            "candidate_comps": [],
+            "state_mutation": StateMutationIntent.REPLACE,
+            "resolution_category": ResolutionCategory.RESOLVED_STRATEGY,
+        })
+    if len(candidates) > 1:
+        return understanding.model_copy(update={
+            "target_comp": None,
+            "candidate_comps": candidates,
+            "state_mutation": StateMutationIntent.CANDIDATES,
+            "decision_intent": DecisionIntent.COMPOSITION_COMPARISON,
+            "resolution_category": ResolutionCategory.RESOLVED_STRATEGY,
+        })
+    return understanding.model_copy(update={
+        "resolution_category": ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE,
+    })
+
+
+def _normalized(value: str) -> str:
+    return EntityTextNormalizer.normalize(value)
+
+
+def _recommended_item_owner(value: str) -> str:
+    owner, separator, _ = value.partition("方案")
+    if separator:
+        return owner.strip()
+    owner, separator, _ = value.partition(":")
+    return owner.strip() if separator else ""
+
+
 def _relevant_history(
     rows: list[tuple[str, str]], understanding: QueryStateUnderstanding
 ) -> list[AgentMessage]:
@@ -443,6 +638,19 @@ def _deterministic_answer(
         return FinalResponse(
             recommendation=f"当前版本实体目录无法唯一识别“{terms}”。请补充完整阵容、棋子、装备或强化名称。",
             used_tools=["canonical_entity_registry"],
+        )
+    if (
+        understanding
+        and understanding.resolution_category
+        == ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE
+    ):
+        champions = [item.display_name for item in understanding.resolved_entities
+                     if item.entity_type == "champion"]
+        label = "、".join(dict.fromkeys(champions))
+        return FinalResponse(
+            recommendation=(f"已识别到英雄“{label}”，但当前知识库缺少足够可靠的阵容关联数据。"
+                            "我不会仅凭攻略文本中的一次提及自动绑定阵容。"),
+            used_tools=["canonical_entity_registry", "structured_sqlite_retrieval"],
         )
     if understanding and understanding.knowledge_intent == KnowledgeIntent.GENERAL_KNOWLEDGE:
         return FinalResponse(

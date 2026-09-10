@@ -70,7 +70,12 @@ class CanonicalEntityResolver:
                 )]
                 for term, source_kind in terms:
                     normalized = _normalize(term)
-                    if len(normalized) >= 2 and normalized in normalized_query:
+                    if (
+                        len(normalized) >= 2 and normalized in normalized_query
+                        or _is_constrained_single_character_query(
+                            normalized_query, normalized, source_kind, entry
+                        )
+                    ):
                         spans.append((len(normalized), entry, term, source_kind))
             for entry, term in _unambiguous_spans(query, spans):
                 _keep(matches, entry, term, "longest_exact_span", 1.0)
@@ -113,6 +118,7 @@ def _unambiguous_spans(
     for candidate in unique:
         by_term.setdefault(_normalize(candidate[2]), []).append(candidate)
     augment_context = bool(re.search(r"选哪个|三选一|海克斯|强化", query))
+    strategy_context = bool(re.search(r"怎么玩|攻略|玩法|出什么|怎么出|^玩", query))
     filtered: list[tuple[int, dict[str, object], str, str]] = []
     blocked_terms: list[str] = []
     for term, candidates in by_term.items():
@@ -122,6 +128,10 @@ def _unambiguous_spans(
         elif augment_context and "augment" in kinds:
             filtered.extend(value for value in candidates
                             if value[1]["entity_type"] == "augment")
+        elif strategy_context and kinds <= {"champion", "composition"}:
+            # Keep both meanings for the planning layer. It can auditably reconcile an
+            # exact composition title with a champion alias using structured comp data.
+            filtered.extend(candidates)
         else:
             # A composition explicitly introduced by “玩” remains unambiguous even
             # when its name collides with another entity type.
@@ -168,3 +178,19 @@ def _resolved(
 
 def _normalize(value: str) -> str:
     return EntityTextNormalizer.normalize(value)
+
+
+def _is_constrained_single_character_query(
+    query: str, term: str, source_kind: str, entry: dict[str, object]
+) -> bool:
+    """Allow unique one-character champion names only in explicit entity-query shapes."""
+    if (
+        len(term) != 1
+        or source_kind != "canonical"
+        or entry["entity_type"] != "champion"
+    ):
+        return False
+    return query in {
+        f"{term}怎么玩", f"{term}攻略", f"{term}玩法", f"玩{term}",
+        f"{term}出什么", f"{term}怎么出", f"{term}怎么出装", f"{term}出什么装备",
+    }

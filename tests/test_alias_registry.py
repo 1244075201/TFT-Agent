@@ -74,3 +74,23 @@ async def test_existing_item_alias_still_uses_the_same_catalog(tmp_path: Path) -
     catalog = await service.entity_catalog()
     ui = next(item for item in catalog.search("青龙刀") if item.entity_type == "item")
     assert ui.canonical_id == chat.canonical_id
+
+
+@pytest.mark.asyncio
+async def test_single_character_champion_requires_explicit_entity_query(tmp_path: Path) -> None:
+    source = Path(__file__).parents[1] / "data" / "tft.sqlite3"
+    database = tmp_path / "single-character.sqlite3"
+    shutil.copy2(source, database)
+    service = AgentService(Settings(database_path=database))
+
+    for query in ("易怎么玩", "易出什么", "玩易"):
+        resolution = await service._resolver().resolve(query)
+        champion = next(item for item in resolution.entities
+                        if item.entity_type == "champion")
+        assert champion.display_name == "易"
+        assert champion.canonical_id == "DA_18_MasterYi_AD"
+
+    for query in ("这个交易很容易完成", "局势容易判断", "收益可能变化"):
+        resolution = await service._resolver().resolve(query)
+        assert not [item for item in resolution.entities
+                    if item.canonical_id == "DA_18_MasterYi_AD"]

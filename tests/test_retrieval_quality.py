@@ -9,7 +9,7 @@ import pytest
 
 import tft_agent.app.service as service_module
 from tft_agent.app.entity_resolution import CanonicalEntityResolver
-from tft_agent.app.pipeline import AnswerContext, RetrievalTrace, comp_evidence
+from tft_agent.app.pipeline import AnswerContext, ProductMode, RetrievalTrace, comp_evidence
 from tft_agent.app.service import AgentService
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import ChatEvent, ChatRequest, FinalResponse, GameState
@@ -54,6 +54,17 @@ async def _ask(service: AgentService, query: str, session: str) -> list[ChatEven
     events: list[ChatEvent] = []
     stream: AsyncIterator[ChatEvent] = service.ask(ChatRequest(text=query, session_id=session))
     async for event in stream:
+        events.append(event)
+    assert not [event for event in events if event.type == "error"]
+    return events
+
+
+async def _ask_general(service: AgentService, query: str, session: str) -> list[ChatEvent]:
+    events: list[ChatEvent] = []
+    request = ChatRequest(
+        text=query, session_id=session, product_mode=ProductMode.GENERAL_GUIDE.value
+    )
+    async for event in service.ask(request):
         events.append(event)
     assert not [event for event in events if event.type == "error"]
     return events
@@ -360,6 +371,95 @@ async def test_state_aware_retrieval_regression_cases(
 def _composition_names(trace: RetrievalTrace) -> set[str]:
     return {item.display_name for item in trace.retrieved_knowledge.evidence
             if item.entity_type == "composition"}
+
+
+@pytest.mark.asyncio
+async def test_general_guide_conversational_subject_precedence(
+    retrieval_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+
+    await _ask_general(service, "德莱文95怎么玩", "guide-followup-items")
+    await _ask_general(service, "神器开局选什么比较好", "guide-followup-items")
+    inherited = _trace(service)
+    assert inherited.subject_inherited is True
+    assert inherited.conversational_subject is not None
+    assert inherited.conversational_subject.display_name == "德莱文95"
+    assert inherited.understanding.target_comp is not None
+    assert inherited.understanding.target_comp.display_name == "德莱文95"
+    assert _composition_names(inherited) == {"德莱文95"}
+
+    await _ask_general(service, "德莱文95怎么玩", "guide-followup-equipment")
+    await _ask_general(service, "那要什么装备？", "guide-followup-equipment")
+    equipment = _trace(service)
+    assert equipment.subject_inherited is True
+    assert equipment.understanding.target_comp is not None
+    assert equipment.understanding.target_comp.display_name == "德莱文95"
+
+    await _ask_general(service, "德莱文95怎么玩", "guide-global-browse")
+    await _ask_general(service, "当前版本有哪些S级阵容？", "guide-global-browse")
+    browse = _trace(service)
+    assert browse.subject_inherited is False
+    assert browse.understanding.target_comp is None
+    assert browse.retrieval_plan.retrieve_all_comps is True
+
+    await _ask_general(service, "德莱文95怎么玩", "guide-explicit-switch")
+    await _ask_general(service, "那艾希95呢？", "guide-explicit-switch")
+    switched = _trace(service)
+    assert switched.subject_inherited is False
+    assert switched.explicit_entities
+    assert switched.understanding.target_comp is not None
+    assert switched.understanding.target_comp.display_name == "艾希95"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "entity_type", "canonical_id", "target", "category"),
+    [
+        ("狮子狗怎么玩", "champion", "DA_18_Rengar", "重装狮子狗", "resolved_strategy"),
+        ("螳螂怎么玩", "champion", "DA_18_KhaZix", None,
+         "resolved_entity_no_knowledge"),
+        ("剑圣怎么玩", "composition", "16253", "剑圣", "resolved_strategy"),
+        ("易怎么玩", "champion", "DA_18_MasterYi_AD", "剑圣", "resolved_strategy"),
+        ("索拉卡怎么玩", "champion", "DA_18_Soraka", "黑荆棘裁决",
+         "resolved_strategy"),
+        ("墨菲特怎么玩", "champion", "DA_18_Malphite", "黑荆棘赌狼人",
+         "resolved_strategy"),
+        ("德莱文怎么玩", "champion", "DA_Draven18", "德莱文95",
+         "resolved_strategy"),
+        ("德莱文95怎么玩", "composition", "16241", "德莱文95", "resolved_strategy"),
+    ],
+)
+async def test_champion_centric_strategy_routes(
+    retrieval_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+    entity_type: str,
+    canonical_id: str,
+    target: str | None,
+    category: str,
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    events = await _ask(service, query, "champion-route")
+    trace = _trace(service)
+
+    assert any(item.entity_type == entity_type and item.canonical_id == canonical_id
+               for item in trace.resolved_entities)
+    assert trace.understanding.unresolved_terms == []
+    assert trace.final_resolution_category.value == category
+    assert (trace.understanding.target_comp.display_name
+            if trace.understanding.target_comp else None) == target
+    assert [item.display_name for item in trace.understanding.candidate_comps] == []
+    if entity_type == "champion":
+        assert any(call.operation == "find_compositions_by_champion_signals"
+                   for call in trace.repository_calls)
+    answer = next(event for event in events if event.type == "answer")
+    if category == "resolved_entity_no_knowledge":
+        assert answer.response is not None
+        assert "已识别到英雄" in answer.response.recommendation
+        assert "无法唯一识别" not in answer.response.recommendation
 
 
 @pytest.mark.asyncio

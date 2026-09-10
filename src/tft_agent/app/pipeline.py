@@ -46,6 +46,28 @@ class KnowledgeIntent(StrEnum):
     GENERAL_KNOWLEDGE = "general_knowledge"
 
 
+class ResolutionCategory(StrEnum):
+    RESOLVED_STRATEGY = "resolved_strategy"
+    UNRESOLVED_ENTITY = "unresolved_entity"
+    RESOLVED_ENTITY_NO_ROUTE = "resolved_entity_no_route"
+    RESOLVED_ENTITY_NO_KNOWLEDGE = "resolved_entity_no_knowledge"
+
+
+class ConversationSubject(StrictModel):
+    canonical_id: str
+    entity_type: str
+    display_name: str
+    source_turn_offset: int = Field(ge=1)
+
+
+class ChampionCompositionMatch(StrictModel):
+    champion_id: str
+    champion_name: str
+    composition: ResolvedEntity
+    confidence: str
+    sources: list[str] = Field(default_factory=list)
+
+
 class QueryStateUnderstanding(StrictModel):
     kind: QueryKind
     product_mode: ProductMode
@@ -59,6 +81,7 @@ class QueryStateUnderstanding(StrictModel):
     knowledge_intent: KnowledgeIntent = KnowledgeIntent.NONE
     unresolved_terms: list[str] = Field(default_factory=list)
     tier_filter: list[str] = Field(default_factory=list)
+    resolution_category: ResolutionCategory = ResolutionCategory.RESOLVED_STRATEGY
 
 
 class RetrievalPlan(StrictModel):
@@ -117,6 +140,12 @@ class RetrievalTrace(StrictModel):
     parsed_state: GameState = Field(default_factory=GameState)
     game_state_after_merge: GameState = Field(default_factory=GameState)
     injected_history: list[AgentMessage] = Field(default_factory=list)
+    explicit_entities: list[ResolvedEntity] = Field(default_factory=list)
+    conversational_subject: ConversationSubject | None = None
+    subject_inherited: bool = False
+    inheritance_reason: str | None = None
+    champion_candidates: list[ChampionCompositionMatch] = Field(default_factory=list)
+    final_resolution_category: ResolutionCategory = ResolutionCategory.RESOLVED_STRATEGY
 
 
 class AnswerContext(StrictModel):
@@ -206,7 +235,6 @@ def understand_query(
         term = re.split(r"怎么玩|攻略", text, maxsplit=1)[0].strip(" ，,。！？!?")
         normalized_term = EntityTextNormalizer.normalize(term)
         exact_target = any(
-            item.entity_type == "composition" and
             normalized_term in {
                 EntityTextNormalizer.normalize(item.matched_alias),
                 EntityTextNormalizer.normalize(item.display_name),
@@ -222,6 +250,9 @@ def understand_query(
     knowledge_intent = (KnowledgeIntent.GENERAL_KNOWLEDGE if general_knowledge else
                         KnowledgeIntent.COMPOSITION_BROWSE if browse else
                         KnowledgeIntent.ENTITY_FACT if factual else KnowledgeIntent.NONE)
+    category = (ResolutionCategory.UNRESOLVED_ENTITY if unresolved else
+                ResolutionCategory.RESOLVED_ENTITY_NO_ROUTE
+                if entities and not compositions else ResolutionCategory.RESOLVED_STRATEGY)
     return QueryStateUnderstanding(
         kind=(QueryKind.DETERMINISTIC_LOOKUP
             if unresolved or factual or general_knowledge or (browse and not decision_terms)
@@ -237,7 +268,25 @@ def understand_query(
         knowledge_intent=knowledge_intent,
         unresolved_terms=list(dict.fromkeys(unresolved)),
         tier_filter=["S"] if re.search(r"s\s*级", lowered, re.I) else [],
+        resolution_category=category,
     )
+
+
+def is_global_browse_query(text: str, mode: ProductMode = ProductMode.GENERAL_GUIDE) -> bool:
+    lowered = text.casefold()
+    return mode == ProductMode.COMP_BROWSER or any(term in lowered for term in _BROWSE_TERMS)
+
+
+def is_topic_compatible_query(text: str) -> bool:
+    """Conservative GENERAL_GUIDE follow-up gate for omitted conversational subjects."""
+    normalized = EntityTextNormalizer.normalize(text)
+    if normalized in {"那呢", "这个呢", "这套呢", "它呢", "这套阵容呢"}:
+        return True
+    return bool(re.search(
+        r"神器|装备|强化|海克斯|上\s*9|升\s*9|条件|运营|过渡|站位|主[cC]|核心|"
+        r"怎么选|选什么|要什么|该不该|要不要|怎么玩|攻略",
+        text,
+    ))
 
 
 def build_retrieval_plan(
