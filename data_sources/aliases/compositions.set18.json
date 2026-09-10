@@ -1,0 +1,8 @@
+{
+  "aliases": [
+    {"aliases":["天使"],"entity_type":"composition","canonical_name":"森林天使","canonical_id":"16222","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["高迅射"],"entity_type":"composition","canonical_name":"高迅射厄斐","canonical_id":"16271","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["蛇女阵容"],"entity_type":"composition","canonical_name":"6护卫蛇女","canonical_id":"16264","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["蛇女"],"entity_type":"composition","canonical_name":"6护卫蛇女","canonical_id":"16264","scope":"set","set_number":18,"source_refs":["project-review"],"review_status":"rejected","notes":"conflicts with global champion alias"}
+  ]
+}

@@ -577,8 +577,21 @@ class SQLiteGameDataRepository:
                 static_params.extend(active_static_ids)
             else:
                 # Compatibility bootstrap for databases synchronized before active-set metadata.
-                static_sql += " WHERE entity_id LIKE ? OR entity_id LIKE 'DA_Component_%'"
+                from tft_agent.app.aliases import AliasRegistry
+
+                registry_ids = sorted({
+                    entry.canonical_id
+                    for entry in AliasRegistry.load_default().entries
+                    if entry.canonical_id is not None
+                    and (entry.scope == "global" or entry.set_number == set_number)
+                })
+                marks = ",".join("?" for _ in registry_ids)
+                static_sql += (
+                    " WHERE entity_id LIKE ? OR entity_id LIKE 'DA_Component_%'"
+                    + (f" OR entity_id IN ({marks})" if marks else "")
+                )
                 static_params.append(f"DA%{set_number}%")
+                static_params.extend(registry_ids)
             static = connection.execute(static_sql, static_params).fetchall()
             entities = [
                 (str(row["comp_id"]), "composition", str(row["name"]), "datatft")
@@ -596,7 +609,17 @@ class SQLiteGameDataRepository:
                 [(identifier, kind, name, game_patch, set_number, set_name, source)
                  for identifier, kind, name, source in entities],
             )
-            aliases = _catalog_aliases(entities, explicit_aliases)
+            from tft_agent.app.aliases import AliasRegistry
+            registry = AliasRegistry.load_default()
+            materialized = registry.materialize(entities, set_number, game_patch)
+            aliases = [(item.alias, item.canonical_id, item.entity_type, item.alias_kind)
+                       for item in materialized]
+            occupied = {item.alias.casefold() for item in materialized}
+            for identifier, kind, name, _source in entities:
+                if kind == "emblem" and name.endswith("纹章"):
+                    alias = name.removesuffix("纹章") + "转"
+                    if alias.casefold() not in occupied:
+                        aliases.append((alias, identifier, kind, "derived_emblem"))
             connection.executemany(
                 "INSERT OR IGNORE INTO entity_aliases VALUES (?,?,?,?,?,?)",
                 [(alias, identifier, kind, game_patch, set_number, alias_kind)
@@ -669,42 +692,3 @@ class SQLiteGameDataRepository:
             source=row["source"],
             retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
         )
-
-
-def _catalog_aliases(
-    entities: list[tuple[str, str, str, str]], explicit: list[dict[str, str]]
-) -> list[tuple[str, str, str, str]]:
-    candidates: list[tuple[str, str, str, str]] = []
-    by_name = {(kind, name): identifier for identifier, kind, name, _ in entities}
-    for identifier, kind, name, _ in entities:
-        compact = re.sub(r"[\s·•_\-]", "", name).casefold()
-        candidates.append((compact, identifier, kind, "normalized"))
-        minimum = 3 if kind == "composition" else 2
-        if len(compact) > minimum:
-            candidates.extend((compact[:size], identifier, kind, "generated_prefix")
-                              for size in range(minimum, len(compact)))
-            candidates.extend((compact[-size:], identifier, kind, "generated_suffix")
-                              for size in range(minimum, len(compact)))
-        if kind == "emblem" and name.endswith("纹章"):
-            candidates.append((name.removesuffix("纹章") + "转", identifier, kind,
-                               "emblem_suffix"))
-    explicit_candidates: list[tuple[str, str, str, str]] = []
-    for item in explicit:
-        resolved_identifier = by_name.get(
-            (item.get("entity_type", ""), item.get("canonical_name", ""))
-        )
-        if resolved_identifier and item.get("alias"):
-            explicit_candidates.append(
-                (item["alias"], resolved_identifier, item["entity_type"], "explicit")
-            )
-    # A small reviewed alias table is authoritative over generated abbreviations. This
-    # lets common language disambiguate entities without weakening global matching.
-    explicit_keys = {alias.casefold() for alias, _, _, _ in explicit_candidates}
-    candidates = [item for item in candidates
-                  if item[0].casefold() not in explicit_keys]
-    candidates.extend(explicit_candidates)
-    counts: dict[tuple[str, str], set[str]] = {}
-    for alias, identifier, kind, _ in candidates:
-        counts.setdefault((kind, alias.casefold()), set()).add(identifier)
-    return [item for item in candidates
-            if len(counts[(item[2], item[0].casefold())]) == 1]

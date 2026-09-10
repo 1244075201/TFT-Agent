@@ -73,6 +73,17 @@ def test_multi_selector_deduplicates_and_removes_values() -> None:
     assert model.display_values() == []
 
 
+def test_quantity_selector_increments_and_decrements_one_at_a_time() -> None:
+    model = EntitySelectorModel(_catalog(), ["item"], multiple=True, count_duplicates=True)
+    option = model.suggestions("大剑")[0]
+    model.select(option)
+    model.select(option)
+    assert model.selected[0].quantity == 2
+    assert model.display_values() == ["暴风大剑", "暴风大剑"]
+    model.remove(option.canonical_id)
+    assert model.selected[0].quantity == 1
+
+
 def test_general_guide_has_an_isolated_stateless_scope() -> None:
     scope = session_scope("desktop", ProductMode.GENERAL_GUIDE)
     assert scope.session_id == "desktop:general-guide"

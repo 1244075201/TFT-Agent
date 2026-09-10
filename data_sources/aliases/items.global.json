@@ -1,0 +1,24 @@
+{
+  "aliases": [
+    {"aliases":["青龙刀","青龙"],"entity_type":"item","canonical_name":"朔极之矛","canonical_id":"DA_SpearOfShojin","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["蓝buff"],"entity_type":"item","canonical_name":"蓝霸符","canonical_id":"DA_BlueBuff","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["羊刀"],"entity_type":"item","canonical_name":"鬼索的狂暴之刃","canonical_id":"DA_GuinsoosRageblade","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["法爆"],"entity_type":"item","canonical_name":"珠光护手","canonical_id":"DA_JeweledGauntlet","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["无尽"],"entity_type":"item","canonical_name":"无尽之刃","canonical_id":"DA_InfinityEdge","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["鬼书"],"entity_type":"item","canonical_name":"莫雷洛秘典","canonical_id":"DA_Morellonomicon","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["饮血"],"entity_type":"item","canonical_name":"饮血剑","canonical_id":"DA_Bloodthirster","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["帽子","大帽"],"entity_type":"item","canonical_name":"灭世者的死亡之帽","canonical_id":"DA_RabadonsDeathcap","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["巨杀"],"entity_type":"item","canonical_name":"巨人杀手","canonical_id":"DA_GiantSlayer","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["轻语"],"entity_type":"item","canonical_name":"最后的轻语","canonical_id":"DA_LastWhisper","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["科技枪"],"entity_type":"item","canonical_name":"海克斯科技枪刃","canonical_id":"DA_HextechGunblade","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["正义"],"entity_type":"item","canonical_name":"正义之手","canonical_id":"DA_HandOfJustice","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["离子"],"entity_type":"item","canonical_name":"离子火花","canonical_id":"DA_IonicSpark","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["狂徒"],"entity_type":"item","canonical_name":"狂徒铠甲","canonical_id":"DA_WarmogsArmor","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["龙牙"],"entity_type":"item","canonical_name":"巨龙之爪","canonical_id":"DA_DragonsClaw","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["夜刃"],"entity_type":"item","canonical_name":"夜之锋刃","canonical_id":"DA_EdgeOfNight","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["纳什"],"entity_type":"item","canonical_name":"纳什之牙","canonical_id":"DA_NashorsTooth","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["大天使"],"entity_type":"item","canonical_name":"大天使之杖","canonical_id":"DA_ArchangelsStaff","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["电刀"],"entity_type":"item","canonical_name":"斯塔缇克电刃","scope":"global","source_refs":["project-review"],"review_status":"deferred","notes":"ordinary target is not unique in active catalog"},
+    {"aliases":["复活甲"],"entity_type":"item","canonical_name":"夜之锋刃","scope":"global","source_refs":["project-review"],"review_status":"deferred","notes":"historical meaning differs by version"}
+  ]
+}

@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import Field
 
 from tft_agent.agent.state import AgentMessage
+from tft_agent.app.aliases import EntityTextNormalizer
 from tft_agent.app.entity_resolution import EntityResolution, ResolvedEntity
 from tft_agent.core.schemas import GameState, StrictModel
 from tft_agent.tft_mcp_server.schemas import CompStatsRecord, StaticEntityRecord
@@ -38,6 +39,13 @@ class DecisionIntent(StrEnum):
     GENERAL_STRATEGY = "general_strategy"
 
 
+class KnowledgeIntent(StrEnum):
+    NONE = "none"
+    COMPOSITION_BROWSE = "composition_browse"
+    ENTITY_FACT = "entity_fact"
+    GENERAL_KNOWLEDGE = "general_knowledge"
+
+
 class QueryStateUnderstanding(StrictModel):
     kind: QueryKind
     product_mode: ProductMode
@@ -48,6 +56,9 @@ class QueryStateUnderstanding(StrictModel):
     state_mutation: StateMutationIntent = StateMutationIntent.RETAIN
     decision_intent: DecisionIntent = DecisionIntent.GENERAL_STRATEGY
     browse_intent: bool = False
+    knowledge_intent: KnowledgeIntent = KnowledgeIntent.NONE
+    unresolved_terms: list[str] = Field(default_factory=list)
+    tier_filter: list[str] = Field(default_factory=list)
 
 
 class RetrievalPlan(StrictModel):
@@ -61,6 +72,7 @@ class RetrievalPlan(StrictModel):
     candidate_selection_inputs: list[ResolvedEntity] = Field(default_factory=list)
     retrieve_all_comps: bool = False
     retrieve_strategy_text: bool = False
+    tier_filter: list[str] = Field(default_factory=list)
 
 
 class EvidenceRecord(StrictModel):
@@ -177,6 +189,9 @@ def understand_query(
     decision_terms = [term for term in _DECISION_TERMS if term in lowered]
     browse = mode == ProductMode.COMP_BROWSER or any(term in lowered for term in _BROWSE_TERMS)
     factual = any(term in lowered for term in _FACT_TERMS) and not decision_terms
+    general_knowledge = bool(re.search(
+        r"(?:常见|都有哪些).*(?:装备|强化)|(?:装备|强化).*(?:常见|有哪些)", lowered
+    ))
     mutation, target, candidates = _composition_semantics(text, compositions)
     if len(candidates) > 1:
         intent = DecisionIntent.COMPOSITION_COMPARISON
@@ -186,9 +201,31 @@ def understand_query(
         intent = DecisionIntent.FULL_GUIDE
     else:
         intent = DecisionIntent.GENERAL_STRATEGY
+    unresolved = list(resolution.unresolved_terms) if resolution else []
+    if re.search(r"怎么玩|攻略", text):
+        term = re.split(r"怎么玩|攻略", text, maxsplit=1)[0].strip(" ，,。！？!?")
+        normalized_term = EntityTextNormalizer.normalize(term)
+        exact_target = any(
+            item.entity_type == "composition" and
+            normalized_term in {
+                EntityTextNormalizer.normalize(item.matched_alias),
+                EntityTextNormalizer.normalize(item.display_name),
+            }
+            for item in entities
+        )
+        if (
+            term
+            and term not in {"这套阵容", "这个阵容", "阵容", "这套"}
+            and not exact_target
+        ):
+            unresolved.append(term)
+    knowledge_intent = (KnowledgeIntent.GENERAL_KNOWLEDGE if general_knowledge else
+                        KnowledgeIntent.COMPOSITION_BROWSE if browse else
+                        KnowledgeIntent.ENTITY_FACT if factual else KnowledgeIntent.NONE)
     return QueryStateUnderstanding(
-        kind=QueryKind.DETERMINISTIC_LOOKUP if factual or (browse and not decision_terms)
-        else QueryKind.STRATEGY_DECISION,
+        kind=(QueryKind.DETERMINISTIC_LOOKUP
+            if unresolved or factual or general_knowledge or (browse and not decision_terms)
+              else QueryKind.STRATEGY_DECISION),
         product_mode=mode,
         decision_terms=decision_terms,
         resolved_entities=entities,
@@ -197,6 +234,9 @@ def understand_query(
         state_mutation=mutation,
         decision_intent=intent,
         browse_intent=browse,
+        knowledge_intent=knowledge_intent,
+        unresolved_terms=list(dict.fromkeys(unresolved)),
+        tier_filter=["S"] if re.search(r"s\s*级", lowered, re.I) else [],
     )
 
 
@@ -231,7 +271,8 @@ def build_retrieval_plan(
         candidate_selection_inputs=[item for item in other
                                     if item.entity_type in {"item", "augment", "champion"}],
         retrieve_all_comps=understanding.browse_intent,
-        retrieve_strategy_text=decision,
+        retrieve_strategy_text=decision and not understanding.unresolved_terms,
+        tier_filter=understanding.tier_filter,
     )
 
 

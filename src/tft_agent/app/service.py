@@ -174,6 +174,21 @@ class AgentService:
                 yield ChatEvent(type="observation", message="截图识别完成", game_state=state)
             entity_start = perf_counter()
             resolution = await self._resolver().resolve(request.text)
+            resolved_comps = [
+                item for item in resolution.entities if item.entity_type == "composition"
+            ]
+            if (
+                scope.uses_game_state
+                and state.comp_name
+                and not resolved_comps
+                and any(item.entity_type != "composition" for item in resolution.entities)
+            ):
+                state = state.model_copy(
+                    update={
+                        "comp_name": persisted_state.comp_name,
+                        "active_comp_id": persisted_state.active_comp_id,
+                    }
+                )
             understanding = understand_query(
                 request.text, state, product_mode, resolution
             )
@@ -199,7 +214,7 @@ class AgentService:
             retrieval_end = perf_counter()
             history_rows = await self._repo().load_session_messages(scope.session_id)
             history = _relevant_history(history_rows, understanding)
-            gaps = context_gaps(state)
+            gaps = context_gaps(state) if scope.uses_game_state else []
             context = AnswerContext(
                 question=request.text, understanding=understanding, game_state=state,
                 history=history, retrieval_plan=plan, evidence=knowledge.evidence,
@@ -229,7 +244,9 @@ class AgentService:
             yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
                             context_gaps=[*gaps, *knowledge.knowledge_gaps])
             if understanding.kind == QueryKind.DETERMINISTIC_LOOKUP:
-                answer = _deterministic_answer(knowledge, self.settings.current_game_patch)
+                answer = _deterministic_answer(
+                    knowledge, self.settings.current_game_patch, understanding, plan
+                )
                 await self._record_answer(request, answer, scope.session_id)
                 yield ChatEvent(type="answer", message=answer.recommendation, response=answer,
                                 advice_options=_advice_options(answer), retrieval_plan=payload,
@@ -284,7 +301,10 @@ class AgentService:
                 )
         if not requested_comps and plan.retrieve_all_comps:
             start = perf_counter()
-            comps = await self._repo().search_comps(None, plan.game_patch, 8)
+            comps = await self._repo().search_comps(None, plan.game_patch, 50)
+            if plan.tier_filter:
+                comps = [comp for comp in comps if comp.tier in plan.tier_filter]
+            comps = comps[:8]
             calls.append(RepositoryCall(
                 operation="browse_comps", filters={"game_patch": plan.game_patch, "limit": 8},
                 result_count=len(comps), latency_ms=(perf_counter() - start) * 1000,
@@ -412,7 +432,32 @@ def _strategy_chunk_section(heading: str, text: str) -> str:
     return "core"
 
 
-def _deterministic_answer(knowledge: RetrievedKnowledge, patch: str) -> FinalResponse:
+def _deterministic_answer(
+    knowledge: RetrievedKnowledge, patch: str,
+    understanding: QueryStateUnderstanding | None = None,
+    plan: RetrievalPlan | None = None,
+) -> FinalResponse:
+    from tft_agent.app.pipeline import KnowledgeIntent
+    if understanding and understanding.unresolved_terms:
+        terms = "、".join(understanding.unresolved_terms)
+        return FinalResponse(
+            recommendation=f"当前版本实体目录无法唯一识别“{terms}”。请补充完整阵容、棋子、装备或强化名称。",
+            used_tools=["canonical_entity_registry"],
+        )
+    if understanding and understanding.knowledge_intent == KnowledgeIntent.GENERAL_KNOWLEDGE:
+        return FinalResponse(
+            recommendation=(f"当前版本 {patch} 的本地数据没有装备或强化流行度统计，"
+                            "因此不能把全量静态实体当作“常见”名单。"),
+            used_tools=["structured_sqlite_retrieval"],
+        )
+    if understanding and understanding.knowledge_intent == KnowledgeIntent.COMPOSITION_BROWSE:
+        comps = list(dict.fromkeys(item.display_name for item in knowledge.evidence
+                                   if item.entity_type == "composition"))
+        label = "S级阵容" if plan and plan.tier_filter else "强势阵容"
+        message = f"当前版本 {patch} {label}：" + "、".join(comps) if comps else (
+            f"本地数据库没有找到 {patch} 的对应阵容事实。"
+        )
+        return FinalResponse(recommendation=message, used_tools=["structured_sqlite_retrieval"])
     relevant = [item for item in knowledge.evidence if item.section == "core_units"]
     if relevant:
         item = relevant[0]

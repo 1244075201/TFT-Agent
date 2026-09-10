@@ -126,13 +126,13 @@ async def test_five_retrieval_acceptance_cases(
 
     await _ask(
         service,
-        "我2-1还没定阵容，现在有大剑、反曲弓、腰带，应该怎么过渡？",
+        "我2-1还没定阵容，现在有青龙刀、羊刀、狂徒，应该怎么过渡？",
         "case-five",
     )
     fifth = _trace(service)
     item_names = {item.display_name for item in fifth.resolved_entities
                   if item.entity_type == "item"}
-    assert item_names == {"暴风大剑", "反曲之弓", "巨人腰带"}
+    assert item_names == {"朔极之矛", "鬼索的狂暴之刃", "狂徒铠甲"}
     assert fifth.understanding.target_comp is None
     assert fifth.retrieval_plan.retrieve_all_comps is False
     assert not any(call.operation == "browse_comps" for call in fifth.repository_calls)
@@ -267,7 +267,7 @@ async def test_state_aware_retrieval_regression_cases(
     await service._repo().append_session_messages(
         "state-case-two", [("user", "黑荆棘裁决怎么玩？"), ("assistant", "旧回答")]
     )
-    await _ask(service, "我玩蛇女 但是D了半天就两张怎么办", "state-case-two")
+    await _ask(service, "我玩蛇女阵容 但是D了半天就两张怎么办", "state-case-two")
     second = _trace(service)
     assert second.game_state_after_merge.comp_name == "6护卫蛇女"
     assert second.game_state_after_merge.emblems == ["迅捷射手纹章"]

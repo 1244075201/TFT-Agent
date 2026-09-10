@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from pydantic import Field
 
+from tft_agent.app.aliases import EntityTextNormalizer
 from tft_agent.core.schemas import StrictModel
 from tft_agent.tft_mcp_server.schemas import StaticEntityRecord
 
@@ -109,7 +109,7 @@ def is_completed_item(option: EntityOption) -> bool:
     return not is_component(option) and bool(option.components)
 
 
-def search_match_reason(option: EntityOption, query: str) -> str:
+def search_match_reason(option: Any, query: str) -> str:
     normalized = _normalize(query)
     if normalized and normalized in {_normalize(alias) for alias in option.aliases}:
         alias = next(alias for alias in option.aliases if _normalize(alias) == normalized)
@@ -121,8 +121,8 @@ def search_match_reason(option: EntityOption, query: str) -> str:
         "emblem": "当前 Set · 转职",
         "champion": "当前 Set · 棋子",
     }
-    return labels.get(option.entity_type, option.entity_type)
+    return cast(str, labels.get(option.entity_type, option.entity_type))
 
 
 def _normalize(value: str) -> str:
-    return re.sub(r"[\s，,。！？!?、·•_\-]", "", value).casefold()
+    return EntityTextNormalizer.normalize(value)

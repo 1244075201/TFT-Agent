@@ -1,13 +1,12 @@
 """Conservative, patch/set-scoped canonical entity resolution."""
 from __future__ import annotations
 
-import json
 import re
 from difflib import SequenceMatcher
-from pathlib import Path
 
 from pydantic import Field
 
+from tft_agent.app.aliases import EntityTextNormalizer
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import StrictModel
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
@@ -42,12 +41,12 @@ class CanonicalEntityResolver:
         catalog = await self.repository.canonical_catalog(
             self.settings.current_game_patch, self.settings.current_set_number
         )
-        if not self._catalog_ready and not catalog:
+        if not self._catalog_ready:
             await self.repository.rebuild_canonical_catalog(
                 self.settings.current_game_patch,
                 self.settings.current_set_number,
                 self.settings.current_set_name,
-                explicit_aliases(),
+                (),
             )
             catalog = await self.repository.canonical_catalog(
                 self.settings.current_game_patch, self.settings.current_set_number
@@ -168,14 +167,4 @@ def _resolved(
 
 
 def _normalize(value: str) -> str:
-    return re.sub(r"[\s，,。！？!?、·•_\-]", "", value).casefold()
-
-
-def explicit_aliases() -> list[dict[str, str]]:
-    path = Path(__file__).parents[3] / "data_sources" / "entity_aliases.json"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    aliases = value.get("aliases", []) if isinstance(value, dict) else []
-    return [dict(item) for item in aliases if isinstance(item, dict)]
+    return EntityTextNormalizer.normalize(value)

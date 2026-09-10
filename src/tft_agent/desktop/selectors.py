@@ -5,7 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from pydantic import Field
+
+from tft_agent.core.schemas import StrictModel
 from tft_agent.desktop.catalog import CanonicalEntityCatalog, EntityOption, search_match_reason
+
+
+class SelectedEntity(StrictModel):
+    canonical_id: str
+    display_name: str
+    entity_type: str
+    aliases: list[str] = Field(default_factory=list)
+    quantity: int = Field(default=1, ge=1)
 
 
 class EntitySelectorModel:
@@ -17,13 +28,15 @@ class EntitySelectorModel:
         entity_types: Iterable[str],
         *,
         multiple: bool = False,
+        count_duplicates: bool = False,
         predicate: Callable[[EntityOption], bool] | None = None,
     ) -> None:
         self.catalog = catalog
         self.entity_types = frozenset(entity_types)
         self.multiple = multiple
+        self.count_duplicates = count_duplicates
         self.predicate = predicate
-        self.selected: list[EntityOption] = []
+        self.selected: list[SelectedEntity] = []
 
     def suggestions(self, query: str, limit: int = 30) -> list[EntityOption]:
         options = [
@@ -40,18 +53,33 @@ class EntitySelectorModel:
         ):
             raise ValueError(f"unsupported entity type: {option.entity_type}")
         if not self.multiple:
-            self.selected = [option]
-        elif all(item.canonical_id != option.canonical_id for item in self.selected):
-            self.selected.append(option)
+            self.selected = [SelectedEntity(
+                canonical_id=option.canonical_id, display_name=option.display_name,
+                entity_type=option.entity_type, aliases=option.aliases,
+            )]
+        else:
+            existing = next((item for item in self.selected
+                             if item.canonical_id == option.canonical_id), None)
+            if existing is None:
+                self.selected.append(SelectedEntity(
+                    canonical_id=option.canonical_id, display_name=option.display_name,
+                    entity_type=option.entity_type, aliases=option.aliases,
+                ))
+            elif self.count_duplicates:
+                existing.quantity += 1
 
     def remove(self, canonical_id: str) -> None:
-        self.selected = [item for item in self.selected if item.canonical_id != canonical_id]
+        selected = next((item for item in self.selected if item.canonical_id == canonical_id), None)
+        if selected is not None and selected.quantity > 1:
+            selected.quantity -= 1
+        else:
+            self.selected = [item for item in self.selected if item.canonical_id != canonical_id]
 
     def clear(self) -> None:
         self.selected.clear()
 
     def display_values(self) -> list[str]:
-        return [item.display_name for item in self.selected]
+        return [item.display_name for item in self.selected for _ in range(item.quantity)]
 
 
 class AugmentChoiceModel:
@@ -129,7 +157,8 @@ def searchable_selector_class() -> Any:
                 if widget is not None:
                     widget.deleteLater()
             for option in self.model.selected:
-                chip = QPushButton(f"{option.display_name} ×")
+                quantity = f" ×{option.quantity}" if option.quantity > 1 else ""
+                chip = QPushButton(f"{option.display_name}{quantity} ×")
                 chip.setToolTip(option.entity_type)
                 chip.clicked.connect(
                     lambda _checked=False, identifier=option.canonical_id:

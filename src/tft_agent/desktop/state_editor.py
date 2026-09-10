@@ -116,12 +116,14 @@ class GameStateEditor(QScrollArea):
         self.augments = Selector(EntitySelectorModel(catalog, ["augment"], multiple=True))
         self.augment_choices = AugmentChoiceSelector(catalog)
         self.components = Selector(EntitySelectorModel(
-            catalog, ["item"], multiple=True, predicate=is_component
+            catalog, ["item"], multiple=True, count_duplicates=True, predicate=is_component
         ))
         self.completed = Selector(EntitySelectorModel(
-            catalog, ["item"], multiple=True, predicate=is_completed_item
+            catalog, ["item"], multiple=True, count_duplicates=True, predicate=is_completed_item
         ))
-        self.emblems = Selector(EntitySelectorModel(catalog, ["emblem"], multiple=True))
+        self.emblems = Selector(EntitySelectorModel(
+            catalog, ["emblem"], multiple=True, count_duplicates=True
+        ))
         self.units = Selector(EntitySelectorModel(catalog, ["champion"], multiple=True))
         self.notes = QLineEdit()
         for label, widget in (

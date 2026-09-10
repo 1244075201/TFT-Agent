@@ -1,0 +1,16 @@
+{
+  "aliases": [
+    {"aliases":["奶妈"],"entity_type":"champion","canonical_name":"索拉卡","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["大树"],"entity_type":"champion","canonical_name":"茂凯","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["石头人"],"entity_type":"champion","canonical_name":"墨菲特","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["蛇女"],"entity_type":"champion","canonical_name":"卡西奥佩娅","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["稻草人"],"entity_type":"champion","canonical_name":"费德提克","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["猪妹"],"entity_type":"champion","canonical_name":"瑟庄妮","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["狼人"],"entity_type":"champion","canonical_name":"沃里克","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["轮子妈"],"entity_type":"champion","canonical_name":"希维尔","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["木木"],"entity_type":"champion","canonical_name":"阿木木","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["大嘴"],"entity_type":"champion","canonical_name":"克格莫","scope":"global","source_refs":["community-reviewed"],"review_status":"approved"},
+    {"aliases":["老鼠"],"entity_type":"champion","canonical_name":"图奇","scope":"global","source_refs":["project-review"],"review_status":"deferred","notes":"active catalog target missing"},
+    {"aliases":["大头"],"entity_type":"champion","canonical_name":"黑默丁格","scope":"global","source_refs":["project-review"],"review_status":"deferred","notes":"active catalog target missing"}
+  ]
+}
