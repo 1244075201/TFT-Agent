@@ -45,7 +45,8 @@ async def run() -> None:
             "latency_ms": round((perf_counter() - started) * 1000, 1),
             "answer_summary": answer[:120],
         }, ensure_ascii=False))
-    rows = await service._resolver().catalog()
+    context = await service._context()
+    rows = await service._resolver(context).catalog()
     entities = [
         (str(row["canonical_id"]), str(row["entity_type"]),
          str(row["display_name"]), str(row["source"]))

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
 from typing import Any
@@ -19,6 +20,18 @@ SOURCE = "datatft"
 API_BASE_URL = "https://api.datatft.com"
 VERSION_URL = "https://www.datatft.com/explorer"
 USER_AGENT = "TFT-Agent/0.2 (+local personal research; low-frequency snapshot)"
+
+
+@dataclass(frozen=True)
+class RawHTTPResponse:
+    endpoint_type: str
+    request_url: str
+    request_key: str | None
+    retrieved_at: datetime
+    http_status: int
+    etag: str | None
+    content_type: str | None
+    body: str
 
 
 class DataTFTAccessDenied(RuntimeError):
@@ -68,6 +81,15 @@ class DataTFTSource:
         raw_list = listing.get("data", {}).get("list")
         if not isinstance(raw_list, list) or not raw_list:
             raise ValueError("DataTFT composition endpoint returned no list")
+        raw_ids = [
+            str(item.get("id"))
+            for item in raw_list
+            if isinstance(item, dict) and item.get("id") is not None
+        ]
+        if len(raw_ids) != len(raw_list):
+            raise ValueError("DataTFT composition list contains an entry without an ID")
+        if len(set(raw_ids)) != len(raw_ids):
+            raise ValueError("DataTFT composition list contains duplicate IDs")
         comps: list[dict[str, Any]] = []
         for raw_comp in raw_list:
             if not isinstance(raw_comp, dict) or raw_comp.get("id") is None:
@@ -90,13 +112,75 @@ class DataTFTSource:
         )
         return payload, None
 
-    def discover_current_patch(self) -> str:
+    def fetch_current_with_raw(
+        self,
+        responses: list[RawHTTPResponse],
+        expected_game_patch: str | None = None,
+        request_interval_seconds: float = 0.75,
+    ) -> tuple[str, str | None]:
+        """Fetch a canonical snapshot while retaining every source HTTP response."""
+
+        self._assert_robots_allows()
+        game_patch = self.discover_current_patch(responses)
+        if expected_game_patch is not None and expected_game_patch != game_patch:
+            raise ValueError(
+                f"Configured patch {expected_game_patch!r} does not match DataTFT {game_patch!r}"
+            )
+        listing = self._post_json(
+            "/team/comps", {"season": ""}, responses, "COMPOSITION_LIST"
+        )
+        raw_list = listing.get("data", {}).get("list")
+        if not isinstance(raw_list, list) or not raw_list:
+            raise ValueError("DataTFT composition endpoint returned no list")
+        raw_ids = [
+            str(item.get("id"))
+            for item in raw_list
+            if isinstance(item, dict) and item.get("id") is not None
+        ]
+        if len(raw_ids) != len(raw_list):
+            raise ValueError("DataTFT composition list contains an entry without an ID")
+        if len(set(raw_ids)) != len(raw_ids):
+            raise ValueError("DataTFT composition list contains duplicate IDs")
+        comps: list[dict[str, Any]] = []
+        for raw_comp in raw_list:
+            if not isinstance(raw_comp, dict) or raw_comp.get("id") is None:
+                continue
+            time.sleep(request_interval_seconds)
+            response = self._post_json(
+                "/team/strategy", {"id": raw_comp["id"]}, responses,
+                "COMPOSITION_DETAIL", str(raw_comp["id"]),
+            )
+            detail = response.get("data")
+            if not isinstance(detail, dict):
+                raise ValueError(f"DataTFT detail {raw_comp['id']} returned no object")
+            comps.append(self._canonical_live_comp(raw_comp, detail))
+        payload = json.dumps(
+            {
+                "game_patch": game_patch,
+                "sample_scope": (
+                    "DataTFT CN current composition tier and strategy; "
+                    "performance rates are not exposed by these endpoints"
+                ),
+                "comps": comps,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return payload, None
+
+    def discover_current_patch(
+        self, responses: list[RawHTTPResponse] | None = None
+    ) -> str:
         """Read the explicit version label rendered by DataTFT's public explorer."""
 
         request = Request(VERSION_URL, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 html = response.read().decode("utf-8")
+                if responses is not None:
+                    responses.append(
+                        _raw_response("VERSION_PAGE", VERSION_URL, None, response, html)
+                    )
         except (HTTPError, URLError, TimeoutError, UnicodeDecodeError) as exc:
             raise RuntimeError(f"Failed to read DataTFT version page: {exc}") from exc
         direct = _extract_current_patch(html)
@@ -111,6 +195,10 @@ class DataTFTSource:
                     timeout=self.timeout_seconds,
                 ) as response:
                     script = response.read().decode("utf-8")
+                    if responses is not None:
+                        responses.append(
+                            _raw_response("VERSION_PAGE", script_url, None, response, script)
+                        )
             except (HTTPError, URLError, TimeoutError, UnicodeDecodeError):
                 continue
             detected = _extract_current_patch(script)
@@ -118,7 +206,11 @@ class DataTFTSource:
                 return detected
         raise ValueError("DataTFT frontend did not expose a recognizable current patch")
 
-    def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(
+        self, path: str, body: dict[str, Any],
+        responses: list[RawHTTPResponse] | None = None,
+        endpoint_type: str = "UNKNOWN", request_key: str | None = None,
+    ) -> dict[str, Any]:
         url = API_BASE_URL + path
         encoded = json.dumps(body).encode("utf-8")
         request = Request(
@@ -135,8 +227,21 @@ class DataTFTSource:
         )
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
-                value = json.load(response)
+                raw_body = response.read().decode("utf-8")
+                if responses is not None:
+                    responses.append(
+                        _raw_response(endpoint_type, url, request_key, response, raw_body)
+                    )
+                value = json.loads(raw_body)
         except HTTPError as exc:
+            if responses is not None:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                responses.append(RawHTTPResponse(
+                    endpoint_type=endpoint_type, request_url=url,
+                    request_key=request_key, retrieved_at=datetime.now(UTC),
+                    http_status=exc.code, etag=exc.headers.get("ETag"),
+                    content_type=exc.headers.get("Content-Type"), body=error_body,
+                ))
             if exc.code in {401, 403, 429}:
                 raise DataTFTAccessDenied(
                     f"DataTFT API refused public frontend request: HTTP {exc.code}"
@@ -318,3 +423,19 @@ def _extract_current_patch(content: str) -> str | None:
         if match is not None:
             return match.group(1)
     return None
+
+
+def _raw_response(
+    endpoint_type: str, request_url: str, request_key: str | None,
+    response: Any, body: str,
+) -> RawHTTPResponse:
+    return RawHTTPResponse(
+        endpoint_type=endpoint_type,
+        request_url=request_url,
+        request_key=request_key,
+        retrieved_at=datetime.now(UTC),
+        http_status=int(response.status),
+        etag=response.headers.get("ETag"),
+        content_type=response.headers.get("Content-Type"),
+        body=body,
+    )

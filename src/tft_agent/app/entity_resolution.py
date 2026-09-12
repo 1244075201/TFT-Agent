@@ -12,6 +12,7 @@ from tft_agent.core.schemas import StrictModel
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
+from tft_agent.tft_mcp_server.schemas import ActivePatchContext
 
 
 class ResolvedEntity(StrictModel):
@@ -32,26 +33,28 @@ class EntityResolution(StrictModel):
 
 
 class CanonicalEntityResolver:
-    def __init__(self, repository: SQLiteGameDataRepository, settings: Settings) -> None:
+    def __init__(
+        self, repository: SQLiteGameDataRepository,
+        context: ActivePatchContext | Settings, fuzzy_threshold: float | None = None,
+    ) -> None:
         self.repository = repository
-        self.settings = settings
-        self._catalog_ready = False
+        if isinstance(context, Settings):
+            self.context = ActivePatchContext(
+                game_patch=context.current_game_patch,
+                patch_family=re.sub(r"[a-z]+$", "", context.current_game_patch, flags=re.I),
+                set_number=context.current_set_number,
+                set_name=context.current_set_name,
+                active_snapshot_id="settings-override",
+            )
+            self.fuzzy_threshold = context.entity_fuzzy_threshold
+        else:
+            self.context = context
+            self.fuzzy_threshold = fuzzy_threshold if fuzzy_threshold is not None else 0.9
 
     async def resolve(self, query: str) -> EntityResolution:
         catalog = await self.repository.canonical_catalog(
-            self.settings.current_game_patch, self.settings.current_set_number
+            self.context.game_patch, self.context.set_number
         )
-        if not self._catalog_ready:
-            await self.repository.rebuild_canonical_catalog(
-                self.settings.current_game_patch,
-                self.settings.current_set_number,
-                self.settings.current_set_name,
-                (),
-            )
-            catalog = await self.repository.canonical_catalog(
-                self.settings.current_game_patch, self.settings.current_set_number
-            )
-        self._catalog_ready = True
         normalized_query = _normalize(query)
         matches: dict[tuple[str, str], tuple[dict[str, object], str, str, float]] = {}
         # Exact canonical and aliases are checked before generic span matching.
@@ -84,7 +87,7 @@ class CanonicalEntityResolver:
             for entry in catalog:
                 for term in [str(entry["display_name"]), *map(str, entry["aliases"])]:
                     score = SequenceMatcher(None, normalized_query, _normalize(term)).ratio()
-                    if score >= self.settings.entity_fuzzy_threshold:
+                    if score >= self.fuzzy_threshold:
                         scored.append((score, entry, term))
             if scored:
                 best = max(score for score, _, _ in scored)
@@ -96,10 +99,8 @@ class CanonicalEntityResolver:
         return EntityResolution(entities=[_resolved(*value) for value in matches.values()])
 
     async def catalog(self) -> list[dict[str, object]]:
-        if not self._catalog_ready:
-            await self.resolve("初始化当前版本实体目录")
         return await self.repository.canonical_catalog(
-            self.settings.current_game_patch, self.settings.current_set_number
+            self.context.game_patch, self.context.set_number
         )
 
 

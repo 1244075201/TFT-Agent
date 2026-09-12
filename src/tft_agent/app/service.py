@@ -37,6 +37,7 @@ from tft_agent.app.pipeline import (
 )
 from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
+from tft_agent.core.patches import PatchService
 from tft_agent.core.schemas import (
     AdviceEvidence,
     AdviceOption,
@@ -51,6 +52,7 @@ from tft_agent.llm.grounded_decision import GroundedDecisionClient
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
+from tft_agent.tft_mcp_server.schemas import ActivePatchContext
 from tft_agent.vision.deepseek_client import DeepSeekVisionClient
 from tft_agent.vision.workflow import observe_and_merge
 
@@ -61,6 +63,7 @@ class AgentService:
         self._cancelled_sessions: set[str] = set()
         self._repository: SQLiteGameDataRepository | None = None
         self._entity_resolver: CanonicalEntityResolver | None = None
+        self._active_context: ActivePatchContext | None = None
         self._general_guide_resets: set[str] = set()
         self.last_trace: RetrievalTrace | None = None
 
@@ -70,9 +73,32 @@ class AgentService:
             self._repository.initialize_sync()
         return self._repository
 
-    def _resolver(self) -> CanonicalEntityResolver:
-        if self._entity_resolver is None:
-            self._entity_resolver = CanonicalEntityResolver(self._repo(), self.settings)
+    async def _context(self) -> ActivePatchContext:
+        resolved = await PatchService(self._repo(), self.settings).active_context()
+        if resolved != self._active_context:
+            self._active_context = resolved
+            self._entity_resolver = None
+        return self._active_context
+
+    @property
+    def active_context(self) -> ActivePatchContext | None:
+        return self._active_context
+
+    def _resolver(
+        self, context: ActivePatchContext | None = None
+    ) -> CanonicalEntityResolver:
+        if context is None:
+            context = self._active_context or ActivePatchContext(
+                game_patch=self.settings.current_game_patch,
+                patch_family=self.settings.current_game_patch.rstrip("abcdefghijklmnopqrstuvwxyz"),
+                set_number=self.settings.current_set_number,
+                set_name=self.settings.current_set_name,
+                active_snapshot_id="",
+            )
+        if self._entity_resolver is None or self._entity_resolver.context != context:
+            self._entity_resolver = CanonicalEntityResolver(
+                self._repo(), context, self.settings.entity_fuzzy_threshold
+            )
         return self._entity_resolver
 
     def cancel(self, session_id: str) -> None:
@@ -81,6 +107,7 @@ class AgentService:
     async def data_status(self) -> str:
         if not self.settings.database_path.resolve().is_file():
             return "DataTFT：尚未同步"
+        await self._context()
         latest = await self._repo().latest_datatft_snapshot()
         if latest is None:
             return "DataTFT：尚未同步"
@@ -123,7 +150,8 @@ class AgentService:
 
     async def entity_catalog(self) -> CanonicalEntityCatalog:
         """Return a presentation-safe, active-patch catalog for desktop controls."""
-        rows = await self._resolver().catalog()
+        context = await self._context()
+        rows = await self._resolver(context).catalog()
         static_ids = [
             str(row["canonical_id"])
             for row in rows
@@ -138,9 +166,8 @@ class AgentService:
 
     async def composition_cards(self, limit: int = 6) -> list[CompositionCard]:
         """Return current-patch composition summaries without repository internals."""
-        records = await self._repo().search_comps(
-            None, self.settings.current_game_patch, limit=limit
-        )
+        context = await self._context()
+        records = await self._repo().search_comps(None, context.game_patch, limit=limit)
         return [CompositionCard(
             canonical_id=record.comp_id,
             display_name=record.name,
@@ -150,6 +177,7 @@ class AgentService:
         ) for record in records]
 
     async def ask(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        active_context = await self._context()
         if (
             request.mode == ChatMode.EXPERIMENTAL_LIVE
             and not self.settings.experimental_live_enabled
@@ -177,7 +205,7 @@ class AgentService:
         )
         history_rows = await self._repo().load_session_messages(scope.session_id)
         conversational_subject = (
-            await self._conversation_subject(history_rows)
+            await self._conversation_subject(history_rows, active_context)
             if product_mode == ProductMode.GENERAL_GUIDE else None
         )
         vision: DeepSeekVisionClient | None = None
@@ -194,7 +222,7 @@ class AgentService:
                 state = observed.game_state
                 yield ChatEvent(type="observation", message="截图识别完成", game_state=state)
             entity_start = perf_counter()
-            resolution = await self._resolver().resolve(request.text)
+            resolution = await self._resolver(active_context).resolve(request.text)
             explicit_entities = list(resolution.entities)
             entity_attempt = explicit_entity_attempt(request.text)
             subject_inherited = False
@@ -221,9 +249,9 @@ class AgentService:
                     canonical_id=conversational_subject.canonical_id,
                     entity_type=conversational_subject.entity_type,
                     display_name=conversational_subject.display_name,
-                    game_patch=self.settings.current_game_patch,
-                    set_number=self.settings.current_set_number,
-                    set_name=self.settings.current_set_name,
+                    game_patch=active_context.game_patch,
+                    set_number=active_context.set_number,
+                    set_name=active_context.set_name,
                     matched_alias=conversational_subject.display_name,
                     match_kind="conversational_subject",
                     match_score=1.0,
@@ -264,14 +292,14 @@ class AgentService:
                 request.text, state, product_mode, resolution
             )
             champion_matches, champion_calls = await self._champion_composition_matches(
-                resolution.entities
+                resolution.entities, active_context
             )
             understanding = _apply_champion_strategy_route(understanding, champion_matches)
             if (
                 understanding.state_mutation == StateMutationIntent.RETAIN
                 and state.comp_name
             ):
-                retained = await self._resolver().resolve(state.comp_name)
+                retained = await self._resolver(active_context).resolve(state.comp_name)
                 retained_comp = next((item for item in retained.entities
                                       if item.entity_type == "composition"), None)
                 if retained_comp:
@@ -281,8 +309,8 @@ class AgentService:
             state = apply_state_mutation(state, understanding, request.text)
             entity_end = perf_counter()
             plan = build_retrieval_plan(
-                understanding, state, self.settings.current_game_patch,
-                self.settings.current_set_number, self.settings.current_set_name,
+                understanding, state, active_context.game_patch,
+                active_context.set_number, active_context.set_name,
             )
             plan_end = perf_counter()
             knowledge, calls = await self._retrieve(request.text, plan)
@@ -335,7 +363,7 @@ class AgentService:
                 == ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE
             ):
                 answer = _deterministic_answer(
-                    knowledge, self.settings.current_game_patch, understanding, plan
+                    knowledge, plan.game_patch, understanding, plan
                 )
                 await self._record_answer(request, answer, scope.session_id)
                 yield ChatEvent(type="answer", message=answer.recommendation, response=answer,
@@ -365,13 +393,13 @@ class AgentService:
                 await vision.close()
 
     async def _conversation_subject(
-        self, rows: list[tuple[str, str]]
+        self, rows: list[tuple[str, str]], context: ActivePatchContext
     ) -> ConversationSubject | None:
         user_turns = [content for role, content in rows[-8:] if role == "user"]
         for offset, content in enumerate(reversed(user_turns), start=1):
             if is_global_browse_query(content):
                 return None
-            resolution = await self._resolver().resolve(content)
+            resolution = await self._resolver(context).resolve(content)
             subjects = [item for item in resolution.entities
                         if item.entity_type in {"composition", "champion"}]
             compositions = [item for item in subjects if item.entity_type == "composition"]
@@ -388,16 +416,16 @@ class AgentService:
         return None
 
     async def _champion_composition_matches(
-        self, entities: list[ResolvedEntity]
+        self, entities: list[ResolvedEntity], context: ActivePatchContext
     ) -> tuple[list[ChampionCompositionMatch], list[RepositoryCall]]:
         champions = [item for item in entities if item.entity_type == "champion"]
         if not champions:
             return [], []
         started = perf_counter()
         comps = await self._repo().search_comps(
-            None, self.settings.current_game_patch, limit=50
+            None, context.game_patch, limit=50
         )
-        catalog = await self._resolver().catalog()
+        catalog = await self._resolver(context).catalog()
         catalog_terms: dict[str, set[str]] = {}
         for row in catalog:
             if row["entity_type"] != "champion":
@@ -433,9 +461,9 @@ class AgentService:
                         canonical_id=comp.comp_id,
                         entity_type="composition",
                         display_name=comp.name,
-                        game_patch=self.settings.current_game_patch,
-                        set_number=self.settings.current_set_number,
-                        set_name=self.settings.current_set_name,
+                        game_patch=context.game_patch,
+                        set_number=context.set_number,
+                        set_name=context.set_name,
                         matched_alias=comp.name,
                         match_kind="structured_champion_bridge",
                         match_score=1.0,
@@ -447,7 +475,7 @@ class AgentService:
             operation="find_compositions_by_champion_signals",
             filters={
                 "champion_ids": [item.canonical_id for item in champions],
-                "game_patch": self.settings.current_game_patch,
+                "game_patch": context.game_patch,
                 "signals": ["core_units", "recommended_item_owner",
                             "exact_composition_title_identity"],
             },

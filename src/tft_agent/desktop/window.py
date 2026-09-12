@@ -74,12 +74,14 @@ class DesktopMainWindow(QMainWindow):
             data_status = f"数据读取失败：{exc}"
             catalog = CanonicalEntityCatalog([])
             cards = []
+        active = self.service.active_context
+        set_number = active.set_number if active else self.service.settings.current_set_number
+        game_patch = active.game_patch if active else self.service.settings.current_game_patch
         header = QLabel(
-            f"<h2>云顶数据指导 Agent</h2>Set {self.service.settings.current_set_number} · "
-            f"Patch {self.service.settings.current_game_patch}"
+            f"<h2>云顶数据指导 Agent</h2>Set {set_number} · Patch {game_patch}"
         )
         self.navigation = WorkspaceNavigation(data_status)
-        self.guide_page = GuideChatPage(self.service.settings.current_game_patch, cards)
+        self.guide_page = GuideChatPage(game_patch, cards)
         self.match_page = MatchGuidancePage(catalog)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.guide_page)

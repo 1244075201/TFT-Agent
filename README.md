@@ -107,15 +107,22 @@ Runtime never scrapes DataTFT. Import a reviewed canonical JSON export (recommen
 
 ```bash
 uv run tft-sync-datatft --input data_sources/datatft_snapshot.example.json
+uv run tft-sync-datatft --input snapshot.json --patch 18.2
 ```
 
 Without `--input`, the synchronizer checks `robots.txt`, then uses the public frontend composition
-list and strategy requests with a configurable delay between details. It imports the real current
+list and strategy requests with a configurable delay between details. Each version, list, and
+per-composition detail response is stored with its HTTP provenance before normalization. It imports
+the real current
 tiers, core units, item IDs, and early/mid/final operation text. The current endpoints do not expose
 placement/top-four/win/play rates, so those values remain null. It does not bypass authentication,
 CAPTCHAs, rate limits, or access restrictions. A canonical snapshot contains `game_patch`, optional
 `sample_scope`, and a `comps` array with named statistics and guide fields. Every record retains its
-source URL, retrieval time, content hash, server, and exact patch.
+source URL, retrieval time, content hash, server, and exact patch. A candidate patch becomes active
+only after its complete snapshot and patch-scoped canonical catalog pass validation; activation is
+atomic and a failed run leaves the previous active patch unchanged. Historical patches and immutable
+snapshots remain queryable by an explicit exact-patch override. Settings provide the empty-database
+bootstrap scope; once initialized, the SQLite patch registry is runtime authority.
 
 ## Real LLM Agent Loop
 

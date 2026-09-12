@@ -147,6 +147,119 @@ MIGRATIONS = [
     CREATE INDEX idx_entity_aliases_scope_alias
         ON entity_aliases(game_patch, set_number, alias COLLATE NOCASE);
     """,
+    """
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+
+    ALTER TABLE datatft_comps RENAME TO datatft_comps_legacy;
+    ALTER TABLE datatft_snapshots RENAME TO datatft_snapshots_legacy;
+    DROP INDEX idx_datatft_snapshot_patch;
+    DROP INDEX idx_datatft_comp_name;
+
+    CREATE TABLE datatft_snapshots (
+        snapshot_id TEXT PRIMARY KEY, source TEXT NOT NULL, server TEXT NOT NULL,
+        game_patch TEXT NOT NULL, sample_scope TEXT, source_url TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL, content_hash TEXT NOT NULL, etag TEXT,
+        status TEXT NOT NULL, raw_payload TEXT NOT NULL,
+        sync_id TEXT,
+        canonical_format_version INTEGER NOT NULL DEFAULT 1,
+        raw_source_status TEXT NOT NULL DEFAULT 'LEGACY_UNAVAILABLE',
+        validation_report TEXT,
+        validated_at TEXT,
+        UNIQUE(game_patch, content_hash)
+    );
+    CREATE INDEX idx_datatft_snapshot_patch
+        ON datatft_snapshots(game_patch, retrieved_at);
+
+    CREATE TABLE datatft_comps (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, name TEXT NOT NULL,
+        tier TEXT, average_place REAL, play_rate REAL, top4_rate REAL, win_rate REAL,
+        core_units TEXT NOT NULL, recommended_items TEXT NOT NULL, augments TEXT NOT NULL,
+        level_plan TEXT NOT NULL, source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id),
+        FOREIGN KEY(snapshot_id) REFERENCES datatft_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_datatft_comp_name ON datatft_comps(name COLLATE NOCASE);
+
+    INSERT INTO datatft_snapshots (
+        snapshot_id, source, server, game_patch, sample_scope, source_url,
+        retrieved_at, content_hash, etag, status, raw_payload
+    )
+    SELECT snapshot_id, source, server, game_patch, sample_scope, source_url,
+           retrieved_at, content_hash, etag, status, raw_payload
+    FROM datatft_snapshots_legacy;
+
+    INSERT INTO datatft_comps (
+        snapshot_id, comp_id, name, tier, average_place, play_rate, top4_rate,
+        win_rate, core_units, recommended_items, augments, level_plan
+    )
+    SELECT snapshot_id, comp_id, name, tier, average_place, play_rate, top4_rate,
+           win_rate, core_units, recommended_items, augments, level_plan
+    FROM datatft_comps_legacy;
+
+    DROP TABLE datatft_comps_legacy;
+    DROP TABLE datatft_snapshots_legacy;
+
+    CREATE TABLE game_patches (
+        game_patch TEXT PRIMARY KEY,
+        patch_family TEXT NOT NULL,
+        set_number INTEGER NOT NULL CHECK(set_number >= 1),
+        set_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('candidate','active','historical')),
+        active_snapshot_id TEXT,
+        source TEXT NOT NULL,
+        discovered_at TEXT NOT NULL,
+        synced_at TEXT,
+        validated_at TEXT,
+        activated_at TEXT,
+        FOREIGN KEY(active_snapshot_id) REFERENCES datatft_snapshots(snapshot_id)
+    );
+    CREATE UNIQUE INDEX idx_game_patches_single_active
+        ON game_patches(status) WHERE status = 'active';
+
+    CREATE TABLE datatft_sync_runs (
+        sync_id TEXT PRIMARY KEY,
+        requested_patch TEXT,
+        detected_patch TEXT,
+        set_number INTEGER,
+        set_name TEXT,
+        server TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(
+            status IN ('running','fetched','validated','activated','failed')
+        ),
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        canonical_snapshot_id TEXT,
+        warning_json TEXT NOT NULL DEFAULT '[]',
+        failure_stage TEXT,
+        failure_code TEXT,
+        failure_message TEXT,
+        FOREIGN KEY(canonical_snapshot_id) REFERENCES datatft_snapshots(snapshot_id)
+    );
+
+    CREATE TABLE datatft_source_responses (
+        response_id TEXT PRIMARY KEY,
+        sync_id TEXT NOT NULL,
+        game_patch TEXT,
+        endpoint_type TEXT NOT NULL,
+        request_url TEXT NOT NULL,
+        request_key TEXT,
+        retrieved_at TEXT NOT NULL,
+        http_status INTEGER,
+        etag TEXT,
+        content_hash TEXT NOT NULL,
+        content_type TEXT,
+        response_body TEXT NOT NULL,
+        parse_status TEXT NOT NULL,
+        error_message TEXT,
+        FOREIGN KEY(sync_id) REFERENCES datatft_sync_runs(sync_id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_datatft_responses_sync
+        ON datatft_source_responses(sync_id, endpoint_type, request_key);
+
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+    """,
 ]
 
 

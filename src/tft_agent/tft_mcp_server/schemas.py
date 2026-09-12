@@ -144,6 +144,51 @@ class SnapshotStatus(StrEnum):
     INVALID = "invalid"
 
 
+class PatchStatus(StrEnum):
+    CANDIDATE = "candidate"
+    ACTIVE = "active"
+    HISTORICAL = "historical"
+
+
+class SyncRunStatus(StrEnum):
+    RUNNING = "running"
+    FETCHED = "fetched"
+    VALIDATED = "validated"
+    ACTIVATED = "activated"
+    FAILED = "failed"
+
+
+class RawSourceStatus(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    CANONICAL_INPUT_ONLY = "CANONICAL_INPUT_ONLY"
+    LEGACY_UNAVAILABLE = "LEGACY_UNAVAILABLE"
+
+
+class ActivePatchContext(StrictModel):
+    game_patch: str
+    patch_family: str
+    set_number: int = Field(ge=1)
+    set_name: str
+    active_snapshot_id: str
+
+
+class DataTFTSourceResponse(StrictModel):
+    response_id: str
+    sync_id: str
+    game_patch: str | None = None
+    endpoint_type: str
+    request_url: str
+    request_key: str | None = None
+    retrieved_at: datetime
+    http_status: int | None = None
+    etag: str | None = None
+    content_hash: str
+    content_type: str | None = None
+    response_body: str
+    parse_status: str = "parsed"
+    error_message: str | None = None
+
+
 class DataSnapshotMetadata(StrictModel):
     snapshot_id: str
     source: str = "datatft"
