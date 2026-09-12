@@ -1,10 +1,16 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tft_agent.ingestion.sources.datatft import DataTFTSource, _extract_current_patch
+from tft_agent.ingestion.sources import datatft
+from tft_agent.ingestion.sources.datatft import (
+    DataTFTSource,
+    RawHTTPResponse,
+    _extract_current_patch,
+)
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
@@ -55,6 +61,69 @@ def test_parser_rejects_unknown_page_shape() -> None:
 def test_extracts_current_patch_from_frontend_constant() -> None:
     script = 'const Mxe="18.1d",vc=[{value:"18.1d"},{value:"18.1"}]'
     assert _extract_current_patch(script) == "18.1d"
+
+
+class _FakeResponse:
+    def __init__(self, body: str, content_type: str) -> None:
+        self._body = body.encode()
+        self.status = 200
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_discovers_patch_from_vite_bootstrap_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = {
+        "https://www.datatft.com/explorer": _FakeResponse(
+            '<script type="module" src="/assets/index-current.js"></script>', "text/html"
+        ),
+        "https://www.datatft.com/assets/index-current.js": _FakeResponse(
+            'const deps=["assets/bootstrap-current.js","assets/site.css"]',
+            "application/javascript",
+        ),
+        "https://www.datatft.com/assets/bootstrap-current.js": _FakeResponse(
+            'const Cxe=crypto,xxe="18.2",gc=[{value:"18.2"},{value:"18.1d"}]',
+            "application/javascript",
+        ),
+    }
+
+    def fake_urlopen(request: Any, timeout: float) -> _FakeResponse:
+        del timeout
+        return pages[request.full_url]
+
+    monkeypatch.setattr(datatft, "urlopen", fake_urlopen)
+    responses: list[RawHTTPResponse] = []
+    source = DataTFTSource("https://www.datatft.com/comps/tier/")
+
+    assert source.discover_current_patch(responses) == "18.2"
+    assert [item.request_url for item in responses] == list(pages)
+
+
+@pytest.mark.parametrize("label", ["Ver: 18.2b", "数据版本 18.2b"])
+def test_legacy_patch_detection_preserves_hotfix(label: str) -> None:
+    assert _extract_current_patch(label) == "18.2b"
+
+
+def test_patch_detection_ignores_unstructured_version_like_number() -> None:
+    assert _extract_current_patch('<div data-build="18.2">version 18.2</div>') is None
+
+
+def test_live_fetch_rejects_expected_patch_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = DataTFTSource("https://www.datatft.com/comps/tier/")
+    monkeypatch.setattr(source, "_assert_robots_allows", lambda: None)
+    monkeypatch.setattr(source, "discover_current_patch", lambda _responses=None: "18.2")
+
+    with pytest.raises(ValueError, match="18.1d.*18.2"):
+        source.fetch_current_with_raw([], "18.1d", 0.25)
 
 
 @pytest.mark.asyncio

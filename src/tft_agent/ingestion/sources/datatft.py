@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -20,6 +21,9 @@ SOURCE = "datatft"
 API_BASE_URL = "https://api.datatft.com"
 VERSION_URL = "https://www.datatft.com/explorer"
 USER_AGENT = "TFT-Agent/0.2 (+local personal research; low-frequency snapshot)"
+MAX_VERSION_ASSETS = 16
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -171,7 +175,7 @@ class DataTFTSource:
     def discover_current_patch(
         self, responses: list[RawHTTPResponse] | None = None
     ) -> str:
-        """Read the explicit version label rendered by DataTFT's public explorer."""
+        """Read DataTFT's structured frontend version, with legacy text fallbacks."""
 
         request = Request(VERSION_URL, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
         try:
@@ -183,12 +187,18 @@ class DataTFTSource:
                     )
         except (HTTPError, URLError, TimeoutError, UnicodeDecodeError) as exc:
             raise RuntimeError(f"Failed to read DataTFT version page: {exc}") from exc
-        direct = _extract_current_patch(html)
+        direct, source = _extract_patch_with_source(html)
         if direct is not None:
+            logger.info("Detected DataTFT patch %s from %s", direct, source)
             return direct
-        scripts = re.findall(r'<script[^>]+src=["\']([^"\']+\.js)["\']', html, re.IGNORECASE)
-        for source in reversed(scripts):
-            script_url = urljoin(VERSION_URL, source)
+
+        pending = _javascript_urls(html, VERSION_URL, html=True)
+        visited: set[str] = set()
+        while pending and len(visited) < MAX_VERSION_ASSETS:
+            script_url = pending.pop(0)
+            if script_url in visited:
+                continue
+            visited.add(script_url)
             try:
                 with urlopen(
                     Request(script_url, headers={"User-Agent": USER_AGENT}),
@@ -201,9 +211,15 @@ class DataTFTSource:
                         )
             except (HTTPError, URLError, TimeoutError, UnicodeDecodeError):
                 continue
-            detected = _extract_current_patch(script)
+            detected, source = _extract_patch_with_source(script)
             if detected is not None:
+                logger.info(
+                    "Detected DataTFT patch %s from %s at %s", detected, source, script_url
+                )
                 return detected
+            for dependency in _javascript_urls(script, script_url):
+                if dependency not in visited and dependency not in pending:
+                    pending.append(dependency)
         raise ValueError("DataTFT frontend did not expose a recognizable current patch")
 
     def _post_json(
@@ -414,15 +430,48 @@ def _strings(value: Any) -> list[str]:
 
 
 def _extract_current_patch(content: str) -> str | None:
+    return _extract_patch_with_source(content)[0]
+
+
+def _extract_patch_with_source(content: str) -> tuple[str | None, str | None]:
+    structured = re.search(
+        r'(?:const|let|var)\s+[^;\r\n]{0,256}?\b\w+="([0-9]+\.[0-9]+[a-z]?)",'
+        r'\w+=\[\{value:"\1"\}',
+        content,
+        re.IGNORECASE,
+    )
+    if structured is not None:
+        return structured.group(1), "js_bundle_structured_versions"
     for pattern in (
         r"Ver:\s*([0-9]+\.[0-9]+[a-z]?)",
         r"数据版本\s*([0-9]+\.[0-9]+[a-z]?)",
-        r'const\s+\w+="([0-9]+\.[0-9]+[a-z]?)",\w+=\[\{value:"\1"\}',
     ):
         match = re.search(pattern, content, re.IGNORECASE)
         if match is not None:
-            return match.group(1)
-    return None
+            return match.group(1), "legacy_pattern"
+    return None, None
+
+
+def _javascript_urls(content: str, base_url: str, html: bool = False) -> list[str]:
+    if html:
+        sources = re.findall(
+            r'<script[^>]+src=["\']([^"\']+\.js)["\']', content, re.IGNORECASE
+        )
+    else:
+        sources = re.findall(
+            r'["\']((?:\.?\.?/|/)?assets/[A-Za-z0-9_.-]+\.js|\./[A-Za-z0-9_.-]+\.js)["\']',
+            content,
+        )
+    origin = urlparse(VERSION_URL)
+    urls: list[str] = []
+    for source in sources:
+        normalized = "/" + source if source.startswith("assets/") else source
+        candidate = urljoin(base_url, normalized)
+        parsed = urlparse(candidate)
+        if parsed.scheme == origin.scheme and parsed.netloc == origin.netloc:
+            if candidate not in urls:
+                urls.append(candidate)
+    return urls
 
 
 def _raw_response(
