@@ -1326,6 +1326,7 @@ class SQLiteGameDataRepository:
                     recommended_items=json.loads(row["recommended_items"]),
                     augments=json.loads(row["augments"]),
                     level_plan=json.loads(row["level_plan"]),
+                    source_response_id=row["source_response_id"],
                     snapshot=snapshot,
                 )
             )

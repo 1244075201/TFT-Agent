@@ -216,6 +216,7 @@ class CompStatsRecord(StrictModel):
     recommended_items: list[str] = Field(default_factory=list)
     augments: list[str] = Field(default_factory=list)
     level_plan: list[str] = Field(default_factory=list)
+    source_response_id: str | None = None
     snapshot: DataSnapshotMetadata
 
 

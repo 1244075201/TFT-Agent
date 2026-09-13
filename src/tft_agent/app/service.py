@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from time import perf_counter
+from typing import Any
 
 from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.state import AgentMessage, AgentState
@@ -27,6 +28,7 @@ from tft_agent.app.pipeline import (
     StateMutationIntent,
     apply_state_mutation,
     build_retrieval_plan,
+    clean_template,
     comp_evidence,
     context_gaps,
     explicit_entity_attempt,
@@ -52,7 +54,7 @@ from tft_agent.llm.grounded_decision import GroundedDecisionClient
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
-from tft_agent.tft_mcp_server.schemas import ActivePatchContext
+from tft_agent.tft_mcp_server.schemas import ActivePatchContext, CompStatsRecord
 from tft_agent.vision.deepseek_client import DeepSeekVisionClient
 from tft_agent.vision.workflow import observe_and_merge
 
@@ -311,6 +313,7 @@ class AgentService:
             plan = build_retrieval_plan(
                 understanding, state, active_context.game_patch,
                 active_context.set_number, active_context.set_name,
+                active_context.active_snapshot_id,
             )
             plan_end = perf_counter()
             knowledge, calls = await self._retrieve(request.text, plan)
@@ -443,13 +446,25 @@ class AgentService:
             })
             for comp in comps:
                 sources: list[str] = []
-                if champion.display_name in comp.core_units:
-                    sources.append("core_units")
-                if any(
-                    _recommended_item_owner(value) == champion.display_name
-                    for value in comp.recommended_items
-                ):
-                    sources.append("recommended_item_owner")
+                if context.active_snapshot_id:
+                    board = await self._repo().get_comp_board_units(
+                        context.active_snapshot_id, comp.comp_id, "FINAL"
+                    )
+                    items = await self._repo().get_comp_items(
+                        context.active_snapshot_id, comp.comp_id
+                    )
+                    if any(_champion_row_matches(row, champion) for row in board):
+                        sources.append("normalized_final_board")
+                    if any(_holder_matches(row, champion) for row in items):
+                        sources.append("normalized_item_holder")
+                if not sources:
+                    if champion.display_name in comp.core_units:
+                        sources.append("legacy_core_units")
+                    if any(
+                        _recommended_item_owner(value) == champion.display_name
+                        for value in comp.recommended_items
+                    ):
+                        sources.append("legacy_recommended_item_owner")
                 if _normalized(comp.name) in identity_terms:
                     sources.append("exact_composition_title_identity")
                 if not sources:
@@ -476,7 +491,8 @@ class AgentService:
             filters={
                 "champion_ids": [item.canonical_id for item in champions],
                 "game_patch": context.game_patch,
-                "signals": ["core_units", "recommended_item_owner",
+                "snapshot_id": context.active_snapshot_id,
+                "signals": ["normalized_final_board", "normalized_item_holder",
                             "exact_composition_title_identity"],
             },
             result_count=len(matches),
@@ -503,8 +519,17 @@ class AgentService:
                 latency_ms=(perf_counter() - start) * 1000,
             ))
             if comp:
-                evidence.extend(item for item in comp_evidence(comp, plan.game_patch)
-                                if item.section in plan.knowledge_needs)
+                normalized, normalized_calls = await self._normalized_comp_evidence(
+                    comp, plan
+                )
+                evidence.extend(normalized)
+                calls.extend(normalized_calls)
+                if not normalized:
+                    legacy_needs = set(plan.knowledge_needs)
+                    if "composition_roster" in legacy_needs:
+                        legacy_needs.add("core_units")
+                    evidence.extend(item for item in comp_evidence(comp, plan.game_patch)
+                                    if item.section in legacy_needs)
             else:
                 gaps.append(
                     f"composition {requested_comp.display_name} is absent for the exact patch"
@@ -520,11 +545,11 @@ class AgentService:
                 result_count=len(comps), latency_ms=(perf_counter() - start) * 1000,
             ))
             for comp in comps:
-                evidence.extend(comp_evidence(comp, plan.game_patch))
+                evidence.append(_composition_summary_evidence(comp, plan))
         elif not requested_comps and plan.candidate_selection_inputs:
             gaps.append("no structured item/augment-to-composition candidate index is available")
         static_entities = [item for item in plan.entities
-                           if item.entity_type in {"augment", "emblem", "item", "champion"}]
+                           if item.entity_type in {"augment", "emblem", "item"}]
         if static_entities:
             start = perf_counter()
             records = await self._repo().find_static_entities_by_ids(
@@ -544,7 +569,13 @@ class AgentService:
                     evidence.append(item)
                 else:
                     gaps.append(f"missing usable definition for {resolved.display_name}")
-        if plan.retrieve_strategy_text:
+        normalized_strategy = any(
+            item.source == "DataTFT normalized" and item.section in {
+                "starting_conditions", "core", "early_game", "mid_game", "late_game", "tip",
+            }
+            for item in evidence
+        )
+        if plan.retrieve_strategy_text and not normalized_strategy:
             text_targets: list[ResolvedEntity | None] = [*requested_comps] or [None]
             for text_target in text_targets:
                 start = perf_counter()
@@ -563,12 +594,121 @@ class AgentService:
                 evidence.extend(item for item in chunk_evidence
                                 if item.section in plan.knowledge_needs)
         available = {item.section for item in evidence}
+        comparison_subject = (
+            set(plan.knowledge_needs) & {"augment", "artifact", "radiant"}
+            or any(item.entity_type == "augment" for item in plan.entities)
+        )
+        if plan.comparison_requested and comparison_subject:
+            gaps.append(
+                "comparison evidence unavailable: associations do not provide rank, priority, "
+                "score, win rate, or stage preference"
+            )
         for need in plan.knowledge_needs:
             if need not in available and need not in {"composition", "leveling"}:
                 gaps.append(f"knowledge coverage missing: {need}")
         unique = {item.evidence_id: item for item in evidence}
         return RetrievedKnowledge(evidence=list(unique.values()),
                                   knowledge_gaps=list(dict.fromkeys(gaps))), calls
+
+    async def _normalized_comp_evidence(
+        self, comp: Any, plan: RetrievalPlan
+    ) -> tuple[list[EvidenceRecord], list[RepositoryCall]]:
+        if not plan.active_snapshot_id:
+            return [], []
+        comp_id = str(comp.comp_id)
+        comp_name = str(comp.name)
+        source_url = str(comp.snapshot.source_url)
+        evidence: list[EvidenceRecord] = []
+        calls: list[RepositoryCall] = []
+
+        async def read(
+            operation: str, function: Awaitable[list[dict[str, Any]]]
+        ) -> list[dict[str, Any]]:
+            started = perf_counter()
+            rows = await function
+            calls.append(RepositoryCall(
+                operation=operation,
+                filters={"snapshot_id": plan.active_snapshot_id, "comp_id": comp_id},
+                result_count=len(rows), latency_ms=(perf_counter() - started) * 1000,
+            ))
+            return rows
+
+        needs = set(plan.knowledge_needs)
+        if needs & {"composition_roster", "positioning"}:
+            board = await read(
+                "get_comp_board_units",
+                self._repo().get_comp_board_units(plan.active_snapshot_id, comp_id, "FINAL"),
+            )
+            selected = board
+            if plan.target_champion and "positioning" in needs:
+                selected = [
+                    row for row in board
+                    if _champion_row_matches(row, plan.target_champion)
+                ]
+            section = "positioning" if "positioning" in needs else "composition_roster"
+            if selected:
+                evidence.append(_normalized_evidence(
+                    plan, comp_id, comp_name, section, selected, source_url,
+                    source_response_id=_shared_source_response(selected),
+                ))
+        category = next((value for value in ("ARTIFACT", "RADIANT", "EMBLEM")
+                         if value.casefold() in needs), None)
+        if needs & {"item_plan", "artifact", "radiant", "emblem"}:
+            operation = "get_comp_items_by_category" if category else "get_comp_items"
+            query = (
+                self._repo().get_comp_items_by_category(
+                    plan.active_snapshot_id, comp_id, category
+                ) if category else
+                self._repo().get_comp_items(plan.active_snapshot_id, comp_id)
+            )
+            items = await read(operation, query)
+            if plan.target_champion:
+                items = [row for row in items if _holder_matches(row, plan.target_champion)]
+            section = category.casefold() if category else "item_plan"
+            if items:
+                evidence.append(_normalized_evidence(
+                    plan, comp_id, comp_name, section, items, source_url,
+                    source_response_id=_shared_source_response(items),
+                ))
+        if "augment" in needs:
+            augments = await read(
+                "get_comp_augments",
+                self._repo().get_comp_augments(plan.active_snapshot_id, comp_id),
+            )
+            if augments:
+                evidence.append(_normalized_evidence(
+                    plan, comp_id, comp_name, "augment", augments, source_url,
+                    source_response_id=_shared_source_response(augments),
+                ))
+        if "condition" in needs:
+            conditions = await read(
+                "get_comp_conditions",
+                self._repo().get_comp_conditions(plan.active_snapshot_id, comp_id),
+            )
+            if conditions:
+                evidence.append(_normalized_evidence(
+                    plan, comp_id, comp_name, "condition", conditions, source_url,
+                    source_response_id=_shared_source_response(conditions),
+                ))
+        strategy_needs = needs & {
+            "starting_conditions", "core", "early_game", "mid_game", "late_game", "tip",
+        }
+        if strategy_needs:
+            sections = await read(
+                "get_comp_strategy_sections",
+                self._repo().get_comp_strategy_sections(plan.active_snapshot_id, comp_id),
+            )
+            for row in sections:
+                section = str(row.get("section_type") or "")
+                if section not in strategy_needs and section != "tip":
+                    continue
+                evidence.append(_normalized_evidence(
+                    plan, comp_id, comp_name, section,
+                    str(row.get("text") or ""), source_url,
+                    source_response_id=str(row.get("source_response_id") or "") or None,
+                    suffix=str(row.get("ordinal") or 0),
+                ))
+        return evidence, calls
 
     async def _record_answer(
         self, request: ChatRequest, answer: FinalResponse, session_id: str | None = None
@@ -722,6 +862,123 @@ def _strategy_chunk_section(heading: str, text: str) -> str:
     return "core"
 
 
+def _champion_row_matches(row: dict[str, Any], champion: ResolvedEntity) -> bool:
+    return (
+        row.get("canonical_champion_id") == champion.canonical_id
+        or _normalized(str(row.get("display_name") or ""))
+        == _normalized(champion.display_name)
+    )
+
+
+def _holder_matches(row: dict[str, Any], champion: ResolvedEntity) -> bool:
+    return (
+        row.get("holder_canonical_champion_id") == champion.canonical_id
+        or _normalized(str(row.get("holder_display_name") or ""))
+        == _normalized(champion.display_name)
+    )
+
+
+def _shared_source_response(rows: list[dict[str, Any]]) -> str | None:
+    values = {str(row.get("source_response_id")) for row in rows
+              if row.get("source_response_id")}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _normalized_evidence(
+    plan: RetrievalPlan,
+    comp_id: str,
+    comp_name: str,
+    section: str,
+    content: str | list[dict[str, Any]],
+    source_url: str,
+    *,
+    source_response_id: str | None,
+    suffix: str = "0",
+) -> EvidenceRecord:
+    semantic: str | list[str] | dict[str, Any]
+    statuses: set[str] = set()
+    if isinstance(content, str):
+        semantic = content
+    elif section in {"composition_roster", "positioning"}:
+        units = []
+        for row in content:
+            statuses.add(str(row.get("resolution_status") or "UNKNOWN"))
+            unit: dict[str, Any] = {"champion": row.get("display_name") or "未解析棋子"}
+            if section == "positioning":
+                unit["position"] = {"x": row.get("x"), "y": row.get("y")}
+                if row.get("stars") is not None:
+                    unit["stars"] = row.get("stars")
+            units.append(unit)
+        semantic = {"units": units, "phase": "FINAL"}
+    elif section in {"item_plan", "artifact", "radiant", "emblem"}:
+        plans = []
+        for row in content:
+            statuses.add(str(row.get("identity_resolution_status") or "UNKNOWN"))
+            definition = row.get("definition")
+            raw_description = (
+                definition.get("description") if isinstance(definition, dict) else None
+            )
+            description = clean_template(str(raw_description)) if raw_description else None
+            plans.append({
+                "holder": row.get("holder_display_name") or "未解析棋子",
+                "plan": row.get("plan_index"), "slot": row.get("slot_index"),
+                "item": row.get("item_display_name") or "未解析装备",
+                "category": row.get("item_category"),
+                "description": description,
+                "resolution_status": row.get("identity_resolution_status"),
+            })
+        semantic = {"item_plans": plans, "association_is_not_ranking": True}
+    elif section == "augment":
+        associations = []
+        for row in content:
+            statuses.add(str(row.get("identity_resolution_status") or "UNKNOWN"))
+            definition = row.get("definition")
+            raw_description = (
+                definition.get("description") if isinstance(definition, dict) else None
+            )
+            description = clean_template(str(raw_description)) if raw_description else None
+            associations.append({
+                "augment": row.get("display_name") or "未解析强化",
+                "description": description, "source_kind": row.get("source_kind"),
+                "resolution_status": row.get("identity_resolution_status"),
+                "rank": None, "priority": None, "score": None,
+            })
+        semantic = {"augments": associations, "association_is_not_ranking": True}
+    else:
+        semantic = {"conditions": [{
+            "kind": row.get("condition_kind"), "type": row.get("condition_type"),
+            "name": row.get("display_name"), "level": row.get("level_value"),
+            "trait_level": row.get("trait_level_text"),
+        } for row in content]}
+    return EvidenceRecord(
+        evidence_id=":".join(("DataTFT-normalized", plan.game_patch, comp_id, section, suffix)),
+        source="DataTFT normalized", requested_patch=plan.game_patch,
+        source_patch=plan.game_patch, patch_match="exact", entity_type="composition",
+        canonical_entity_id=comp_id, display_name=comp_name, section=section,
+        semantic_content=semantic, relevance_score=1.0, url=source_url,
+        snapshot_id=plan.active_snapshot_id, comp_id=comp_id,
+        source_response_id=source_response_id,
+        resolution_status=(next(iter(statuses)) if len(statuses) == 1 else
+                           "MIXED" if statuses else None),
+    )
+
+
+def _composition_summary_evidence(
+    comp: CompStatsRecord, plan: RetrievalPlan
+) -> EvidenceRecord:
+    return EvidenceRecord(
+        evidence_id=":".join(("DataTFT-normalized", plan.game_patch, comp.comp_id,
+                              "composition")),
+        source="DataTFT normalized", requested_patch=plan.game_patch,
+        source_patch=comp.snapshot.game_patch, patch_match="exact",
+        entity_type="composition", canonical_entity_id=comp.comp_id,
+        display_name=comp.name, section="composition",
+        semantic_content={"tier": comp.tier}, relevance_score=1.0,
+        url=comp.snapshot.source_url, snapshot_id=plan.active_snapshot_id,
+        comp_id=comp.comp_id, source_response_id=comp.source_response_id,
+    )
+
+
 def _deterministic_answer(
     knowledge: RetrievedKnowledge, patch: str,
     understanding: QueryStateUnderstanding | None = None,
@@ -761,6 +1018,33 @@ def _deterministic_answer(
             f"本地数据库没有找到 {patch} 的对应阵容事实。"
         )
         return FinalResponse(recommendation=message, used_tools=["structured_sqlite_retrieval"])
+    for section, label in (
+        ("composition_roster", "完整阵容"), ("positioning", "站位"),
+        ("item_plan", "装备方案"), ("artifact", "神器"), ("radiant", "光明装备"),
+        ("emblem", "纹章"), ("augment", "强化"),
+    ):
+        relevant = [item for item in knowledge.evidence if item.section == section]
+        if not relevant:
+            continue
+        item = relevant[0]
+        return FinalResponse(
+            recommendation=(f"{item.display_name}的{label}："
+                            f"{_deterministic_semantic(section, item.semantic_content)}"),
+            used_tools=["structured_sqlite_retrieval"],
+            sources=[f"{item.display_name} · {section} — {item.url}"],
+        )
+    requested = set(plan.knowledge_needs) if plan else set()
+    missing_label = next((label for need, label in (
+        ("radiant", "光明装备"), ("artifact", "神器"), ("emblem", "纹章"),
+        ("augment", "强化"), ("positioning", "站位"), ("composition_roster", "完整阵容"),
+        ("item_plan", "装备方案"),
+    ) if need in requested), None)
+    if missing_label and plan and plan.target_comp:
+        return FinalResponse(
+            recommendation=(f"当前版本 {patch} 的 DataTFT exact 数据中，"
+                            f"{plan.target_comp.display_name}没有可用的{missing_label} relation。"),
+            used_tools=["structured_sqlite_retrieval"],
+        )
     relevant = [item for item in knowledge.evidence if item.section == "core_units"]
     if relevant:
         item = relevant[0]
@@ -776,6 +1060,41 @@ def _deterministic_answer(
         f"本地数据库没有找到 {patch} 的对应事实。"
     )
     return FinalResponse(recommendation=message, used_tools=["structured_sqlite_retrieval"])
+
+
+def _deterministic_semantic(section: str, content: object) -> str:
+    if not isinstance(content, dict):
+        return str(content)
+    if section in {"composition_roster", "positioning"}:
+        units = content.get("units", [])
+        if not isinstance(units, list):
+            return "无"
+        values = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            name = str(unit.get("champion") or "未解析棋子")
+            position = unit.get("position")
+            if section == "positioning" and isinstance(position, dict):
+                name += f"（x={position.get('x')}, y={position.get('y')}）"
+            values.append(name)
+        return "、".join(values) + "。"
+    key = "augments" if section == "augment" else "item_plans"
+    rows = content.get(key, [])
+    if not isinstance(rows, list):
+        return "无"
+    values = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if section == "augment":
+            value = str(row.get("augment") or "未解析强化")
+            if row.get("description"):
+                value += "：" + str(row["description"])
+        else:
+            value = f"{row.get('holder') or '未解析棋子'}—{row.get('item') or '未解析装备'}"
+        values.append(value)
+    return "；".join(values) + "。"
 
 
 def _advice_options(response: FinalResponse) -> list[AdviceOption]:

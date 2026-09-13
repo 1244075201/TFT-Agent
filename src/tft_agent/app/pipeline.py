@@ -96,6 +96,9 @@ class RetrievalPlan(StrictModel):
     retrieve_all_comps: bool = False
     retrieve_strategy_text: bool = False
     tier_filter: list[str] = Field(default_factory=list)
+    active_snapshot_id: str = ""
+    target_champion: ResolvedEntity | None = None
+    comparison_requested: bool = False
 
 
 class EvidenceRecord(StrictModel):
@@ -111,6 +114,10 @@ class EvidenceRecord(StrictModel):
     semantic_content: str | list[str] | dict[str, Any]
     relevance_score: float = Field(ge=0, le=1)
     url: str
+    snapshot_id: str | None = None
+    comp_id: str | None = None
+    source_response_id: str | None = None
+    resolution_status: str | None = None
 
 
 class RetrievedKnowledge(StrictModel):
@@ -169,9 +176,17 @@ class AnswerContext(StrictModel):
                            if item.section != "starting_conditions"]
         blocks = [
             "USER QUESTION\n" + self.question.strip(),
+            "ACTIVE PATCH\n- " + self.retrieval_plan.game_patch,
             "USER FACTS\n" + ("\n".join(f"- {key}: {value}" for key, value in facts.items())
                                 if facts else "- No structured facts provided"),
         ]
+        targets = ([self.retrieval_plan.target_comp]
+                   if self.retrieval_plan.target_comp else self.retrieval_plan.candidate_comps)
+        if targets or self.retrieval_plan.target_champion:
+            labels = [item.display_name for item in targets if item]
+            if self.retrieval_plan.target_champion:
+                labels.append("英雄：" + self.retrieval_plan.target_champion.display_name)
+            blocks.append("TARGET\n- " + " / ".join(labels))
         if self.history:
             lines = [f"{'User' if item.role == 'user' else 'Assistant'}: {item.content}"
                      for item in self.history]
@@ -190,13 +205,19 @@ class AnswerContext(StrictModel):
             )
         if recommendations:
             blocks.append(
-                "RETRIEVED STRATEGY RECOMMENDATIONS\n"
+                "STRUCTURED FACTS AND STRATEGY SECTIONS\n"
                 + _grouped_evidence(recommendations, self.understanding.candidate_comps)
             )
         if self.context_gaps:
             blocks.append("CONTEXT GAPS\n- " + "\n- ".join(self.context_gaps))
         if self.knowledge_gaps:
             blocks.append("KNOWLEDGE GAPS\n- " + "\n- ".join(self.knowledge_gaps))
+        provenance = list(dict.fromkeys(
+            f"{item.source} / patch {item.source_patch or 'unknown'}"
+            for item in self.evidence
+        ))
+        if provenance:
+            blocks.append("PROVENANCE\n- " + "\n- ".join(provenance))
         return "\n\n".join(blocks)
 
 
@@ -207,7 +228,11 @@ _DECISION_TERMS = (
     "choose", "compare", "versus", " vs ",
 )
 _BROWSE_TERMS = ("强势阵容", "推荐几套", "s级阵容", "阵容榜", "meta阵容", "版本阵容")
-_FACT_TERMS = ("核心棋子", "有哪些棋子", "阵容成员", "装备是什么", "定义", "效果是什么")
+_FACT_TERMS = (
+    "核心棋子", "有哪些棋子", "完整阵容", "阵容成员", "装备是什么", "出什么装备",
+    "怎么站", "站哪里", "站位", "有哪些神器", "有什么神器", "光明装备", "有什么转职",
+    "有哪些强化", "有什么强化", "有什么海克斯", "定义", "效果是什么", "干什么的",
+)
 
 
 def understand_query(
@@ -317,6 +342,7 @@ def build_retrieval_plan(
     patch: str,
     set_number: int,
     set_name: str,
+    active_snapshot_id: str = "",
 ) -> RetrievalPlan:
     target = understanding.target_comp
     candidates = understanding.candidate_comps
@@ -324,8 +350,12 @@ def build_retrieval_plan(
              if item.entity_type != "composition"]
     decision = understanding.kind == QueryKind.STRATEGY_DECISION
     needs: list[str] = []
+    question = state.user_question or ""
+    champion = next((item for item in other if item.entity_type == "champion"), None)
+    requested = _requested_comp_knowledge(question)
     if target or candidates:
-        needs.extend(["composition", "core_units", "items"])
+        needs.append("composition")
+        needs.extend(requested or ["item_plan", "composition_roster"])
         if decision:
             needs.extend(_strategy_sections(understanding.decision_intent, state))
     if any(item.entity_type == "emblem" for item in other):
@@ -333,6 +363,8 @@ def build_retrieval_plan(
                       "transition", "flex", "conditional_advice"])
     if any(item.entity_type == "augment" for item in other):
         needs.extend(["augment_definition", "conditional_advice"])
+        if _comparison_requested(question):
+            needs.append("augment_comparison")
     if target is None and not candidates and decision:
         needs.extend(["general_early_game", "item_flexibility", "early_slam", "transition"])
     return RetrievalPlan(
@@ -344,7 +376,36 @@ def build_retrieval_plan(
         retrieve_all_comps=understanding.browse_intent,
         retrieve_strategy_text=decision and not understanding.unresolved_terms,
         tier_filter=understanding.tier_filter,
+        active_snapshot_id=active_snapshot_id,
+        target_champion=champion,
+        comparison_requested=_comparison_requested(question),
     )
+
+
+def _requested_comp_knowledge(question: str) -> list[str]:
+    lowered = question.casefold()
+    needs: list[str] = []
+    if any(term in lowered for term in ("棋子", "完整阵容", "阵容成员", "全员")):
+        needs.append("composition_roster")
+    if any(term in lowered for term in ("怎么站", "站哪里", "站位", "位置")):
+        needs.append("positioning")
+    if "神器" in lowered:
+        needs.append("artifact")
+    elif "光明" in lowered:
+        needs.append("radiant")
+    elif any(term in lowered for term in ("转职", "纹章")):
+        needs.append("emblem")
+    elif any(term in lowered for term in ("装备", "出装")):
+        needs.append("item_plan")
+    if any(term in lowered for term in ("强化", "海克斯")):
+        needs.append("augment")
+    if any(term in lowered for term in ("条件", "开局")):
+        needs.append("condition")
+    return needs
+
+
+def _comparison_requested(question: str) -> bool:
+    return bool(re.search(r"选哪个|哪个好|比较|排名|优先级|最强|最好", question, re.I))
 
 
 def apply_state_mutation(
@@ -449,9 +510,51 @@ def _user_facts(state: GameState) -> dict[str, object]:
 
 def _format_evidence(item: EvidenceRecord) -> str:
     return (
-        f"- {item.display_name} / {item.section}: {item.semantic_content} "
+        f"- {item.display_name} / {item.section}: {_semantic_text(item.semantic_content)} "
         f"[来源：{item.source}｜版本：{item.source_patch or '未标注'}]"
     )
+
+
+def _semantic_text(content: str | list[str] | dict[str, Any]) -> str:
+    if not isinstance(content, dict):
+        return str(content)
+    units = content.get("units")
+    if isinstance(units, list):
+        values = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            value = str(unit.get("champion") or "未解析棋子")
+            position = unit.get("position")
+            if isinstance(position, dict):
+                value += f"（横向 {position.get('x')}，纵向 {position.get('y')}）"
+            values.append(value)
+        return "、".join(values)
+    plans = content.get("item_plans")
+    if isinstance(plans, list):
+        return "；".join(
+            f"{row.get('holder') or '未解析棋子'}：{row.get('item') or '未解析装备'}"
+            for row in plans if isinstance(row, dict)
+        ) + "（关联不代表全局排名）"
+    augments = content.get("augments")
+    if isinstance(augments, list):
+        return "；".join(
+            f"{row.get('augment') or '未解析强化'}：{_summary_text(row.get('description'))}"
+            f"（关联来源 {row.get('source_kind') or '未知'}）"
+            for row in augments[:12] if isinstance(row, dict)
+        ) + "（关联顺序不代表排名或优先级）"
+    conditions = content.get("conditions")
+    if isinstance(conditions, list):
+        return "；".join(
+            f"{row.get('kind') or '条件'}：{row.get('name') or row.get('type') or '未命名'}"
+            for row in conditions if isinstance(row, dict)
+        )
+    return str(content)
+
+
+def _summary_text(value: object, limit: int = 180) -> str:
+    text = str(value or "暂无定义").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 def _grouped_evidence(
@@ -506,7 +609,7 @@ def comp_evidence(record: CompStatsRecord, requested_patch: str) -> list[Evidenc
 def static_evidence(
     record: StaticEntityRecord, resolved: ResolvedEntity, requested_patch: str
 ) -> EvidenceRecord | None:
-    description = _clean_template(record.description)
+    description = clean_template(record.description)
     if not description:
         return None
     section = "augment_definition" if resolved.entity_type == "augment" else (
@@ -542,7 +645,7 @@ def _clean_item(value: str) -> str:
     return value
 
 
-def _clean_template(value: str) -> str:
+def clean_template(value: str) -> str:
     return re.sub(r"@[A-Za-z0-9_.*:]+@", "未公开数值", value).strip()
 
 

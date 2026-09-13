@@ -123,6 +123,7 @@ async def test_five_retrieval_acceptance_cases(
     assert static_call.result_count == 3
     assert not any(call.operation == "browse_comps" for call in third.repository_calls)
     assert third.llm_call_count == 1
+    assert any("comparison evidence unavailable" in gap for gap in third.knowledge_gaps)
 
     events = await _ask(service, "德莱文95核心棋子是谁？", "case-four")
     fourth = _trace(service)
