@@ -260,6 +260,108 @@ MIGRATIONS = [
     COMMIT;
     PRAGMA foreign_keys = ON;
     """,
+    """
+    PRAGMA foreign_keys = OFF;
+    PRAGMA legacy_alter_table = ON;
+    BEGIN;
+    ALTER TABLE datatft_snapshots RENAME TO datatft_snapshots_v1a_old;
+    DROP INDEX idx_datatft_snapshot_patch;
+    CREATE TABLE datatft_snapshots (
+        snapshot_id TEXT PRIMARY KEY, source TEXT NOT NULL, server TEXT NOT NULL,
+        game_patch TEXT NOT NULL, sample_scope TEXT, source_url TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL, content_hash TEXT NOT NULL, etag TEXT,
+        status TEXT NOT NULL, raw_payload TEXT NOT NULL, sync_id TEXT,
+        canonical_format_version INTEGER NOT NULL DEFAULT 1,
+        raw_source_status TEXT NOT NULL DEFAULT 'LEGACY_UNAVAILABLE',
+        validation_report TEXT, validated_at TEXT,
+        UNIQUE(game_patch, canonical_format_version, content_hash)
+    );
+    INSERT INTO datatft_snapshots SELECT * FROM datatft_snapshots_v1a_old;
+    DROP TABLE datatft_snapshots_v1a_old;
+    CREATE INDEX idx_datatft_snapshot_patch
+        ON datatft_snapshots(game_patch, retrieved_at);
+
+    CREATE TABLE datatft_comp_metadata (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, difficulty INTEGER,
+        tags_json TEXT NOT NULL, upstream_updated_at TEXT,
+        representative_external_hero_id TEXT, representative_external_hero_key TEXT,
+        representative_canonical_champion_id TEXT, representative_display_name TEXT,
+        representative_resolution_status TEXT NOT NULL, source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id),
+        FOREIGN KEY(snapshot_id, comp_id) REFERENCES datatft_comps(snapshot_id, comp_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_response_id) REFERENCES datatft_source_responses(response_id)
+    );
+    CREATE TABLE datatft_comp_board_units (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, board_phase TEXT NOT NULL,
+        board_index INTEGER NOT NULL, x INTEGER, y INTEGER,
+        external_hero_id TEXT, external_hero_key TEXT, canonical_champion_id TEXT,
+        display_name TEXT, stars INTEGER, is_main INTEGER, replace_id TEXT,
+        replace_key TEXT, extra_traits_json TEXT NOT NULL, powerups_json TEXT NOT NULL,
+        resolution_status TEXT NOT NULL, unresolved_raw_token TEXT, source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id, board_phase, board_index),
+        FOREIGN KEY(snapshot_id, comp_id) REFERENCES datatft_comps(snapshot_id, comp_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_response_id) REFERENCES datatft_source_responses(response_id)
+    );
+    CREATE TABLE datatft_comp_item_plan_items (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL,
+        holder_external_hero_id TEXT NOT NULL, holder_external_hero_key TEXT,
+        holder_canonical_champion_id TEXT, holder_display_name TEXT,
+        holder_resolution_status TEXT NOT NULL, plan_index INTEGER NOT NULL,
+        slot_index INTEGER NOT NULL, external_item_id TEXT, external_item_key TEXT,
+        canonical_item_id TEXT, item_display_name TEXT, resolution_status TEXT NOT NULL,
+        unresolved_raw_token TEXT, source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id, holder_external_hero_id, plan_index, slot_index),
+        FOREIGN KEY(snapshot_id, comp_id) REFERENCES datatft_comps(snapshot_id, comp_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_response_id) REFERENCES datatft_source_responses(response_id)
+    );
+    CREATE TABLE datatft_comp_conditions (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, condition_index INTEGER NOT NULL,
+        condition_kind TEXT NOT NULL, condition_type TEXT, external_id TEXT,
+        external_key TEXT, display_name TEXT, level_value TEXT, trait_level_text TEXT,
+        trait_level_idx TEXT, carry_hero_key TEXT, carry_hero_value TEXT,
+        raw_entry_json TEXT NOT NULL, source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id, condition_index),
+        FOREIGN KEY(snapshot_id, comp_id) REFERENCES datatft_comps(snapshot_id, comp_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_response_id) REFERENCES datatft_source_responses(response_id)
+    );
+    CREATE TABLE datatft_comp_hexes (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, association_index INTEGER NOT NULL,
+        source_kind TEXT NOT NULL, external_hex_id TEXT, external_hex_key TEXT,
+        canonical_augment_id TEXT, display_name TEXT, resolution_status TEXT NOT NULL,
+        unresolved_raw_token TEXT, priority INTEGER, rank INTEGER, source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id, association_index),
+        FOREIGN KEY(snapshot_id, comp_id) REFERENCES datatft_comps(snapshot_id, comp_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_response_id) REFERENCES datatft_source_responses(response_id)
+    );
+    CREATE TABLE datatft_comp_strategy_sections (
+        snapshot_id TEXT NOT NULL, comp_id TEXT NOT NULL, section_type TEXT NOT NULL,
+        ordinal INTEGER NOT NULL, text TEXT NOT NULL, labels_json TEXT NOT NULL,
+        author TEXT, upstream_updated_at TEXT, raw_entry_json TEXT,
+        source_response_id TEXT,
+        PRIMARY KEY(snapshot_id, comp_id, section_type, ordinal),
+        FOREIGN KEY(snapshot_id, comp_id) REFERENCES datatft_comps(snapshot_id, comp_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(source_response_id) REFERENCES datatft_source_responses(response_id)
+    );
+    CREATE INDEX idx_datatft_board_comp
+        ON datatft_comp_board_units(snapshot_id, comp_id, board_phase);
+    CREATE INDEX idx_datatft_items_comp
+        ON datatft_comp_item_plan_items(snapshot_id, comp_id);
+    CREATE INDEX idx_datatft_conditions_comp
+        ON datatft_comp_conditions(snapshot_id, comp_id);
+    CREATE INDEX idx_datatft_hexes_comp
+        ON datatft_comp_hexes(snapshot_id, comp_id, source_kind);
+    CREATE INDEX idx_datatft_sections_comp
+        ON datatft_comp_strategy_sections(snapshot_id, comp_id, section_type);
+    COMMIT;
+    PRAGMA legacy_alter_table = OFF;
+    PRAGMA foreign_keys = ON;
+    """,
 ]
 
 

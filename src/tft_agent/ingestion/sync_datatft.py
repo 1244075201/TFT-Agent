@@ -99,6 +99,9 @@ async def sync(
         await repository.rebuild_canonical_catalog(
             detected_patch, selected_set_number, selected_set_name, (), (), snapshot_id
         )
+        await repository.resolve_datatft_normalized_entities(
+            snapshot_id, detected_patch, selected_set_number
+        )
         previous_snapshot_id = (
             current.active_snapshot_id if current.set_number == selected_set_number else ""
         )

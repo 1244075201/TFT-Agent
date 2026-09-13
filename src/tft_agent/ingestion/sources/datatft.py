@@ -15,6 +15,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+from tft_agent.ingestion.datatft_normalization import (
+    RuntimeCatalog,
+    build_runtime_catalog,
+    canonical_knowledge,
+    decrypt_runtime_catalog,
+)
 from tft_agent.tft_mcp_server.schemas import CompStatsRecord, DataSnapshotMetadata
 
 SOURCE = "datatft"
@@ -76,11 +82,13 @@ class DataTFTSource:
         """Fetch the same public composition data used by the DataTFT web frontend."""
 
         self._assert_robots_allows()
-        game_patch = self.discover_current_patch()
+        discovery_responses: list[RawHTTPResponse] = []
+        game_patch = self.discover_current_patch(discovery_responses)
         if expected_game_patch is not None and expected_game_patch != game_patch:
             raise ValueError(
                 f"Configured patch {expected_game_patch!r} does not match DataTFT {game_patch!r}"
             )
+        catalog = self._fetch_runtime_catalog(discovery_responses, _set_number(game_patch))
         listing = self._post_json("/team/comps", {"season": ""})
         raw_list = listing.get("data", {}).get("list")
         if not isinstance(raw_list, list) or not raw_list:
@@ -101,9 +109,10 @@ class DataTFTSource:
             time.sleep(request_interval_seconds)
             response = self._post_json("/team/strategy", {"id": raw_comp["id"]})
             detail = response.get("data")
-            comps.append(self._canonical_live_comp(raw_comp, detail))
+            comps.append(self._canonical_live_comp(raw_comp, detail, catalog))
         payload = json.dumps(
             {
+                "canonical_format_version": 2,
                 "game_patch": game_patch,
                 "sample_scope": (
                     "DataTFT CN current composition tier and strategy; "
@@ -130,6 +139,7 @@ class DataTFTSource:
             raise ValueError(
                 f"Configured patch {expected_game_patch!r} does not match DataTFT {game_patch!r}"
             )
+        catalog = self._fetch_runtime_catalog(responses, _set_number(game_patch))
         listing = self._post_json(
             "/team/comps", {"season": ""}, responses, "COMPOSITION_LIST"
         )
@@ -157,9 +167,10 @@ class DataTFTSource:
             detail = response.get("data")
             if not isinstance(detail, dict):
                 raise ValueError(f"DataTFT detail {raw_comp['id']} returned no object")
-            comps.append(self._canonical_live_comp(raw_comp, detail))
+            comps.append(self._canonical_live_comp(raw_comp, detail, catalog))
         payload = json.dumps(
             {
+                "canonical_format_version": 2,
                 "game_patch": game_patch,
                 "sample_scope": (
                     "DataTFT CN current composition tier and strategy; "
@@ -222,6 +233,38 @@ class DataTFTSource:
                     pending.append(dependency)
         raise ValueError("DataTFT frontend did not expose a recognizable current patch")
 
+    def _fetch_runtime_catalog(
+        self, version_responses: list[RawHTTPResponse], set_number: int
+    ) -> RuntimeCatalog:
+        """Fetch and decode the frontend runtime catalog, retaining its raw module."""
+
+        key: str | None = None
+        module_url: str | None = None
+        for response in version_responses:
+            key_match = re.search(
+                r'currentData:null,key:"([A-Za-z0-9+/=]+)"', response.body
+            )
+            module_match = re.search(
+                rf'import\("\./(data-{re.escape(self.server)}-[A-Za-z0-9_-]+\.js)"\)',
+                response.body,
+            )
+            if key_match:
+                key = key_match.group(1)
+            if module_match:
+                module_url = urljoin(response.request_url, module_match.group(1))
+        if key is None or module_url is None:
+            raise ValueError("DataTFT frontend did not expose its structured runtime catalog")
+        request = Request(module_url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                body = response.read().decode("utf-8")
+                version_responses.append(
+                    _raw_response("RUNTIME_CATALOG", module_url, None, response, body)
+                )
+        except (HTTPError, URLError, TimeoutError, UnicodeDecodeError) as exc:
+            raise RuntimeError(f"Failed to read DataTFT runtime catalog: {exc}") from exc
+        return build_runtime_catalog(decrypt_runtime_catalog(body, key), set_number)
+
     def _post_json(
         self, path: str, body: dict[str, Any],
         responses: list[RawHTTPResponse] | None = None,
@@ -270,7 +313,9 @@ class DataTFTSource:
         return value
 
     @staticmethod
-    def _canonical_live_comp(summary: dict[str, Any], detail: Any) -> dict[str, Any]:
+    def _canonical_live_comp(
+        summary: dict[str, Any], detail: Any, catalog: RuntimeCatalog | None = None
+    ) -> dict[str, Any]:
         detail = detail if isinstance(detail, dict) else {}
         equips = detail.get("equips") if isinstance(detail.get("equips"), list) else []
         core_units = [
@@ -294,7 +339,7 @@ class DataTFTSource:
             for label, key in (("前期", "earlyDesc"), ("中期", "midDesc"), ("成型", "finalDesc"))
             if detail.get(key)
         ]
-        return {
+        canonical = {
             "id": str(summary["id"]),
             "name": str(detail.get("title") or summary.get("title") or summary["id"]),
             "tier": summary.get("tier"),
@@ -309,6 +354,9 @@ class DataTFTSource:
                 *([f"开局条件:{detail['open']}"] if detail.get("open") else []),
             ],
         }
+        if catalog is not None:
+            canonical["knowledge_v2"] = canonical_knowledge(summary, detail, catalog)
+        return canonical
 
     def parse(
         self,
@@ -427,6 +475,13 @@ def _rate(value: Any) -> float | None:
 
 def _strings(value: Any) -> list[str]:
     return [str(item).strip() for item in value] if isinstance(value, list) else []
+
+
+def _set_number(game_patch: str) -> int:
+    match = re.match(r"(\d+)", game_patch)
+    if match is None:
+        raise ValueError(f"DataTFT patch {game_patch!r} has no set number")
+    return int(match.group(1))
 
 
 def _extract_current_patch(content: str) -> str | None:

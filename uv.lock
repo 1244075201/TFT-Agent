@@ -1341,6 +1341,7 @@ name = "tft-decision-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "mcp", extra = ["cli"] },
     { name = "mss" },
     { name = "openai" },
@@ -1366,6 +1367,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50,<51" },
     { name = "mcp", extras = ["cli"], specifier = ">=2,<3" },
     { name = "mss", specifier = ">=10,<11" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<2" },
