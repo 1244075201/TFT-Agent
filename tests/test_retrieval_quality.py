@@ -507,20 +507,24 @@ async def test_new_general_guide_conversation_clears_only_guide_scope(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("query", "entity_type", "canonical_id", "target", "category"),
+    ("query", "entity_type", "canonical_id", "target", "candidates", "category"),
     [
-        ("狮子狗怎么玩", "champion", "DA_18_Rengar", "重装狮子狗", "resolved_strategy"),
-        ("螳螂怎么玩", "champion", "DA_18_KhaZix", None,
-         "resolved_entity_no_knowledge"),
-        ("剑圣怎么玩", "composition", "16253", "剑圣", "resolved_strategy"),
-        ("易怎么玩", "champion", "DA_18_MasterYi_AD", "剑圣", "resolved_strategy"),
-        ("索拉卡怎么玩", "champion", "DA_18_Soraka", "黑荆棘裁决",
+        ("狮子狗怎么玩", "champion", "DA_18_Rengar", None,
+         {"世纪和解", "重装狮子狗"}, "resolved_strategy"),
+        ("螳螂怎么玩", "champion", "DA_18_KhaZix", "世纪和解", set(),
          "resolved_strategy"),
-        ("墨菲特怎么玩", "champion", "DA_18_Malphite", "黑荆棘赌狼人",
+        ("剑圣怎么玩", "composition", "16253", "剑圣", set(), "resolved_strategy"),
+        ("易怎么玩", "champion", "DA_18_MasterYi_AD", "剑圣", set(),
          "resolved_strategy"),
-        ("德莱文怎么玩", "champion", "DA_Draven18", "德莱文95",
+        ("索拉卡怎么玩", "champion", "DA_18_Soraka", None,
+         {"6护卫蛇女", "永森莲华ez", "赌芸阿娜", "高森林EZ", "黑荆棘裁决"},
          "resolved_strategy"),
-        ("德莱文95怎么玩", "composition", "16241", "德莱文95", "resolved_strategy"),
+        ("墨菲特怎么玩", "champion", "DA_18_Malphite", None,
+         {"猎手豹女", "黑荆棘裁决", "黑荆棘赌狼人"}, "resolved_strategy"),
+        ("德莱文怎么玩", "champion", "DA_Draven18", "德莱文95", set(),
+         "resolved_strategy"),
+        ("德莱文95怎么玩", "composition", "16241", "德莱文95", set(),
+         "resolved_strategy"),
     ],
 )
 async def test_champion_centric_strategy_routes(
@@ -530,6 +534,7 @@ async def test_champion_centric_strategy_routes(
     entity_type: str,
     canonical_id: str,
     target: str | None,
+    candidates: set[str],
     category: str,
 ) -> None:
     monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
@@ -543,7 +548,7 @@ async def test_champion_centric_strategy_routes(
     assert trace.final_resolution_category.value == category
     assert (trace.understanding.target_comp.display_name
             if trace.understanding.target_comp else None) == target
-    assert [item.display_name for item in trace.understanding.candidate_comps] == []
+    assert {item.display_name for item in trace.understanding.candidate_comps} == candidates
     if entity_type == "champion":
         assert any(call.operation == "find_compositions_by_champion_signals"
                    for call in trace.repository_calls)

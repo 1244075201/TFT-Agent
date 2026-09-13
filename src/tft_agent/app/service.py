@@ -32,10 +32,12 @@ from tft_agent.app.pipeline import (
     comp_evidence,
     context_gaps,
     explicit_entity_attempt,
+    format_item_plans,
     is_global_browse_query,
     is_topic_compatible_query,
     static_evidence,
     understand_query,
+    unresolved_entity_fragment,
 )
 from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
@@ -233,12 +235,8 @@ class AgentService:
             explicit_subjects = [item for item in resolution.entities
                                  if item.entity_type in {"composition", "champion"}]
             unresolved_attempt = (
-                entity_attempt
-                if entity_attempt
-                and not _strategy_subject_attempt_resolved(
-                    entity_attempt, resolution.entities
-                )
-                else None
+                unresolved_entity_fragment(entity_attempt, resolution.entities)
+                if entity_attempt else None
             )
             if (
                 conversational_subject
@@ -364,6 +362,8 @@ class AgentService:
                 understanding.kind == QueryKind.DETERMINISTIC_LOOKUP
                 or understanding.resolution_category
                 == ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE
+                or any(gap.startswith("recognized entities lack exact relation:")
+                       for gap in knowledge.knowledge_gaps)
             ):
                 answer = _deterministic_answer(
                     knowledge, plan.game_patch, understanding, plan
@@ -593,6 +593,7 @@ class AgentService:
                 chunk_evidence = [_chunk_evidence(chunk, plan) for chunk in chunks]
                 evidence.extend(item for item in chunk_evidence
                                 if item.section in plan.knowledge_needs)
+        gaps.extend(_combination_relation_gaps(plan, evidence))
         available = {item.section for item in evidence}
         comparison_subject = (
             set(plan.knowledge_needs) & {"augment", "artifact", "radiant"}
@@ -767,19 +768,6 @@ def _normalized(value: str) -> str:
     return EntityTextNormalizer.normalize(value)
 
 
-def _strategy_subject_attempt_resolved(
-    term: str, entities: list[ResolvedEntity]
-) -> bool:
-    normalized = _normalized(term)
-    return any(
-        item.entity_type in {"champion", "composition"}
-        and normalized in {
-            _normalized(item.display_name), _normalized(item.matched_alias),
-        }
-        for item in entities
-    )
-
-
 def _conversation_subject_from_entities(
     entities: list[ResolvedEntity],
 ) -> ConversationSubject | None:
@@ -882,6 +870,31 @@ def _shared_source_response(rows: list[dict[str, Any]]) -> str | None:
     values = {str(row.get("source_response_id")) for row in rows
               if row.get("source_response_id")}
     return next(iter(values)) if len(values) == 1 else None
+
+
+def _combination_relation_gaps(
+    plan: RetrievalPlan, evidence: list[EvidenceRecord]
+) -> list[str]:
+    if not (plan.target_comp or plan.candidate_comps):
+        return []
+    section_by_type = {"emblem": "emblem", "item": "item_plan", "augment": "augment"}
+    gaps: list[str] = []
+    for entity in plan.entities:
+        section = section_by_type.get(entity.entity_type)
+        if section is None:
+            continue
+        related = any(
+            item.entity_type == "composition"
+            and item.section == section
+            and _normalized(entity.display_name) in _normalized(str(item.semantic_content))
+            for item in evidence
+        )
+        if not related:
+            gaps.append(
+                "recognized entities lack exact relation: "
+                f"{entity.display_name} has no current-patch composition association"
+            )
+    return gaps
 
 
 def _normalized_evidence(
@@ -991,6 +1004,18 @@ def _deterministic_answer(
             recommendation=f"当前版本实体目录无法唯一识别“{terms}”。请补充完整阵容、棋子、装备或强化名称。",
             used_tools=["canonical_entity_registry"],
         )
+    relation_gaps = [gap for gap in knowledge.knowledge_gaps
+                     if gap.startswith("recognized entities lack exact relation:")]
+    if relation_gaps and understanding:
+        names = "、".join(dict.fromkeys(
+            item.display_name for item in understanding.resolved_entities
+        ))
+        return FinalResponse(
+            recommendation=(f"已识别到实体：{names}。但当前版本 {patch} 的证据没有建立"
+                            "这些实体之间的阵容玩法 relation，因此无法给出确定玩法；"
+                            "我不会补造候选路线、适配结论或优先级。"),
+            used_tools=["canonical_entity_registry", "structured_sqlite_retrieval"],
+        )
     if (
         understanding
         and understanding.resolution_category
@@ -1083,6 +1108,8 @@ def _deterministic_semantic(section: str, content: object) -> str:
     rows = content.get(key, [])
     if not isinstance(rows, list):
         return "无"
+    if section != "augment":
+        return format_item_plans(rows)
     values = []
     for row in rows:
         if not isinstance(row, dict):
@@ -1091,8 +1118,6 @@ def _deterministic_semantic(section: str, content: object) -> str:
             value = str(row.get("augment") or "未解析强化")
             if row.get("description"):
                 value += "：" + str(row["description"])
-        else:
-            value = f"{row.get('holder') or '未解析棋子'}—{row.get('item') or '未解析装备'}"
         values.append(value)
     return "；".join(values) + "。"
 

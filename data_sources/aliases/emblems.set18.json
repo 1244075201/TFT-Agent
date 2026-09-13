@@ -1,5 +1,9 @@
 {
   "aliases": [
-    {"aliases":["迅射转","迅射纹章"],"entity_type":"emblem","canonical_name":"迅捷射手纹章","canonical_id":"DA_18_EmblemRapidfire","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"}
+    {"aliases":["迅射转","迅射纹章"],"entity_type":"emblem","canonical_name":"迅捷射手纹章","canonical_id":"DA_18_EmblemRapidfire","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["地狱火转"],"entity_type":"emblem","canonical_name":"地狱火纹章","canonical_id":"DA_18_EmblemInferno","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["裁决转"],"entity_type":"emblem","canonical_name":"裁决使纹章","canonical_id":"DA_18_EmblemExecutioner","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["神谕转"],"entity_type":"emblem","canonical_name":"神谕纹章","canonical_id":"DA_18_EmblemInvoker","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["重装转"],"entity_type":"emblem","canonical_name":"重装战士纹章","canonical_id":"DA_18_EmblemVanguard","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"}
   ]
 }

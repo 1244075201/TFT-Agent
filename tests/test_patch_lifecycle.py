@@ -236,6 +236,10 @@ async def test_legacy_bootstrap_uses_settings_without_patch_hardcode(tmp_path: P
     source = Path(__file__).parents[1] / "data" / "tft.sqlite3"
     database = tmp_path / "legacy.sqlite3"
     shutil.copy2(source, database)
+    # The checked-in/local database may already have an active patch registry.  Clear only
+    # the disposable copy so this test continues to exercise the legacy bootstrap path.
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM game_patches")
     repository = SQLiteGameDataRepository(database)
     await repository.initialize()
     settings = Settings(
@@ -245,9 +249,12 @@ async def test_legacy_bootstrap_uses_settings_without_patch_hardcode(tmp_path: P
     active = await PatchService(repository, settings).active_context()
     assert active.game_patch == settings.current_game_patch
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
+        statuses = dict(connection.execute(
             "SELECT game_patch,status FROM game_patches ORDER BY game_patch"
-        ).fetchall() == [("18.1", "historical"), ("18.1d", "active")]
+        ).fetchall())
+        assert statuses["18.1d"] == "active"
+        assert all(status == "historical" for patch, status in statuses.items()
+                   if patch != "18.1d")
 
 
 def test_patch_family_preserves_hotfix_identity() -> None:

@@ -262,17 +262,9 @@ def understand_query(
     unresolved = list(resolution.unresolved_terms) if resolution else []
     term = explicit_entity_attempt(text)
     if term:
-        normalized_term = EntityTextNormalizer.normalize(term)
-        exact_target = any(
-            item.entity_type in {"champion", "composition"}
-            and normalized_term in {
-                EntityTextNormalizer.normalize(item.matched_alias),
-                EntityTextNormalizer.normalize(item.display_name),
-            }
-            for item in entities
-        )
-        if not exact_target:
-            unresolved.append(term)
+        unresolved_fragment = unresolved_entity_fragment(term, entities)
+        if unresolved_fragment:
+            unresolved.append(unresolved_fragment)
     knowledge_intent = (KnowledgeIntent.GENERAL_KNOWLEDGE if general_knowledge else
                         KnowledgeIntent.COMPOSITION_BROWSE if browse else
                         KnowledgeIntent.ENTITY_FACT if factual else KnowledgeIntent.NONE)
@@ -324,6 +316,34 @@ def explicit_entity_attempt(text: str) -> str | None:
     return None
 
 
+def unresolved_entity_fragment(
+    term: str, entities: list[ResolvedEntity]
+) -> str | None:
+    """Return only uncovered subject text after all deterministic entity mentions."""
+    remainder = EntityTextNormalizer.normalize(term)
+    subject_entity_types = {"champion", "composition", "emblem", "item", "augment"}
+    mentions = sorted(
+        {
+            EntityTextNormalizer.normalize(item.matched_alias)
+            for item in entities
+            if item.matched_alias and item.entity_type in subject_entity_types
+        },
+        key=len,
+        reverse=True,
+    )
+    if not mentions:
+        return term
+    for mention in mentions:
+        remainder = remainder.replace(mention, "", 1)
+    remainder = re.sub(
+        r"^(?:我|想|要|玩|用|拿|有|给|带|现在|这局|这把)+|"
+        r"(?:我|想|要|玩|用|拿|有|给|带|现在|能|可以|吗|好)+$",
+        "",
+        remainder,
+    )
+    return remainder or None
+
+
 def is_topic_compatible_query(text: str) -> bool:
     """Conservative GENERAL_GUIDE follow-up gate for omitted conversational subjects."""
     normalized = EntityTextNormalizer.normalize(text)
@@ -359,12 +379,18 @@ def build_retrieval_plan(
         if decision:
             needs.extend(_strategy_sections(understanding.decision_intent, state))
     if any(item.entity_type == "emblem" for item in other):
+        if target or candidates:
+            needs.append("emblem")
         needs.extend(["emblem_definition", "key_traits", "composition_emblem_advice",
                       "transition", "flex", "conditional_advice"])
     if any(item.entity_type == "augment" for item in other):
+        if target or candidates:
+            needs.append("augment")
         needs.extend(["augment_definition", "conditional_advice"])
         if _comparison_requested(question):
             needs.append("augment_comparison")
+    if (target or candidates) and any(item.entity_type == "item" for item in other):
+        needs.append("item_plan")
     if target is None and not candidates and decision:
         needs.extend(["general_early_game", "item_flexibility", "early_slam", "transition"])
     return RetrievalPlan(
@@ -532,10 +558,7 @@ def _semantic_text(content: str | list[str] | dict[str, Any]) -> str:
         return "、".join(values)
     plans = content.get("item_plans")
     if isinstance(plans, list):
-        return "；".join(
-            f"{row.get('holder') or '未解析棋子'}：{row.get('item') or '未解析装备'}"
-            for row in plans if isinstance(row, dict)
-        ) + "（关联不代表全局排名）"
+        return format_item_plans(plans)
     augments = content.get("augments")
     if isinstance(augments, list):
         return "；".join(
@@ -555,6 +578,29 @@ def _semantic_text(content: str | list[str] | dict[str, Any]) -> str:
 def _summary_text(value: object, limit: int = 180) -> str:
     text = str(value or "暂无定义").strip()
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def format_item_plans(plans: list[object]) -> str:
+    """Render holder/plan/slot structure without assigning recommendation rank."""
+    grouped: dict[str, dict[int, list[tuple[int, str]]]] = {}
+    for value in plans:
+        if not isinstance(value, dict):
+            continue
+        holder = str(value.get("holder") or "未解析棋子")
+        plan = int(value.get("plan") or 0)
+        slot = int(value.get("slot") or 0)
+        item = str(value.get("item") or "未解析装备")
+        grouped.setdefault(holder, {}).setdefault(plan, []).append((slot, item))
+    holders: list[str] = []
+    for holder, holder_plans in grouped.items():
+        rendered_plans = [
+            f"方案{plan}：" + "、".join(
+                item for _, item in sorted(items, key=lambda pair: pair[0])
+            )
+            for plan, items in sorted(holder_plans.items())
+        ]
+        holders.append(f"{holder}（" + "；".join(rendered_plans) + "）")
+    return "；".join(holders) + "（方案编号仅表示上游分组，不代表优先级）"
 
 
 def _grouped_evidence(

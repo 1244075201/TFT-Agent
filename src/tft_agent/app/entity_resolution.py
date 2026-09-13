@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 
 from pydantic import Field
 
-from tft_agent.app.aliases import EntityTextNormalizer
+from tft_agent.app.aliases import AliasRegistry, EntityTextNormalizer
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import StrictModel
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
@@ -55,6 +55,7 @@ class CanonicalEntityResolver:
         catalog = await self.repository.canonical_catalog(
             self.context.game_patch, self.context.set_number
         )
+        _merge_reviewed_aliases(catalog, self.context.set_number, self.context.game_patch)
         normalized_query = _normalize(query)
         matches: dict[tuple[str, str], tuple[dict[str, object], str, str, float]] = {}
         # Exact canonical and aliases are checked before generic span matching.
@@ -179,6 +180,26 @@ def _resolved(
 
 def _normalize(value: str) -> str:
     return EntityTextNormalizer.normalize(value)
+
+
+def _merge_reviewed_aliases(
+    catalog: list[dict[str, object]], set_number: int, game_patch: str
+) -> None:
+    """Overlay reviewed aliases without requiring a catalog/database rebuild."""
+    entities = [
+        (str(row["canonical_id"]), str(row["entity_type"]),
+         str(row["display_name"]), str(row.get("source") or "canonical"))
+        for row in catalog
+    ]
+    aliases = AliasRegistry.load_default().materialize(entities, set_number, game_patch)
+    by_id = {str(row["canonical_id"]): row for row in catalog}
+    for alias in aliases:
+        row = by_id.get(alias.canonical_id)
+        if row is None:
+            continue
+        values = row.get("aliases")
+        if isinstance(values, list) and alias.alias not in values:
+            values.append(alias.alias)
 
 
 def _is_constrained_single_character_query(
