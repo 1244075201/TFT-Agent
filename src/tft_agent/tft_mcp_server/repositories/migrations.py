@@ -362,6 +362,33 @@ MIGRATIONS = [
     PRAGMA legacy_alter_table = OFF;
     PRAGMA foreign_keys = ON;
     """,
+    """
+    CREATE TABLE datatft_item_identities (
+        snapshot_id TEXT NOT NULL, external_item_id TEXT NOT NULL,
+        external_item_key TEXT, canonical_item_id TEXT, display_name TEXT,
+        item_category TEXT NOT NULL, runtime_type TEXT, runtime_description TEXT,
+        static_entity_id TEXT,
+        definition_source TEXT, resolution_status TEXT NOT NULL,
+        unresolved_raw_token TEXT,
+        PRIMARY KEY(snapshot_id, external_item_id),
+        FOREIGN KEY(snapshot_id) REFERENCES datatft_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_datatft_item_identity_key
+        ON datatft_item_identities(snapshot_id, external_item_key);
+    CREATE INDEX idx_datatft_item_identity_category
+        ON datatft_item_identities(snapshot_id, item_category);
+
+    CREATE TABLE datatft_augment_identities (
+        snapshot_id TEXT NOT NULL, external_hex_id TEXT NOT NULL,
+        external_hex_key TEXT, canonical_augment_id TEXT, display_name TEXT,
+        runtime_description TEXT, static_entity_id TEXT, definition_source TEXT,
+        resolution_status TEXT NOT NULL, unresolved_raw_token TEXT,
+        PRIMARY KEY(snapshot_id, external_hex_id),
+        FOREIGN KEY(snapshot_id) REFERENCES datatft_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_datatft_augment_identity_key
+        ON datatft_augment_identities(snapshot_id, external_hex_key);
+    """,
 ]
 
 

@@ -6,6 +6,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -46,12 +47,23 @@ SPECIAL_HERO_IDS_BY_SET = {
 }
 
 
+class ItemCategory(StrEnum):
+    NORMAL = "NORMAL"
+    ARTIFACT = "ARTIFACT"
+    RADIANT = "RADIANT"
+    EMBLEM = "EMBLEM"
+    COMPONENT = "COMPONENT"
+    OTHER = "OTHER"
+
+
 @dataclass(frozen=True)
 class RuntimeEntity:
     external_id: str
     key: str | None
     name: str | None
     code: str | None
+    runtime_type: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,7 +108,14 @@ def build_runtime_catalog(raw: dict[str, Any], set_number: int) -> RuntimeCatalo
         item for item in raw_items if int(item.external_id) not in EXCLUDED_EQUIP_IDS
     ] + [item for item in raw_items if int(item.external_id) in APPENDED_EQUIP_IDS]
     hexes = [
-        RuntimeEntity(item.external_id, item.key or item.external_id, item.name, item.code)
+        RuntimeEntity(
+            item.external_id,
+            item.key or item.external_id,
+            item.name,
+            item.code,
+            item.runtime_type,
+            item.description,
+        )
         for item in _entities(_flatten(raw.get(f"hexs{set_number}")), "hexId", "name")
     ]
     powerups = _entities(raw.get(f"anomalies{set_number}"), "key", "name")
@@ -177,7 +196,7 @@ def decode_team_url(url: str, catalog: RuntimeCatalog) -> dict[str, Any]:
                 token = encoded[cursor : cursor + 2]
                 cursor += 2
                 entity = catalog.items_by_code.get(token)
-                unit["items"].append(_entity_ref(entity, token, "item"))
+                unit["items"].append(_item_ref(entity, token))
                 if entity is None:
                     issues.append(f"unknown item token {token!r}")
         if cursor < len(encoded) and encoded[cursor] == "~":
@@ -258,10 +277,10 @@ def canonical_knowledge(
                 item = catalog.items_by_id.get(str(item_id))
                 plans.append(
                     {
-                        "holder": _entity_ref(hero, hero_id, "hero"),
+                        "holder": _entity_ref(hero, hero_id, "hero", raw_is_id=True),
                         "plan_index": plan_index,
                         "slot_index": slot_index,
-                        "item": _entity_ref(item, str(item_id), "item"),
+                        "item": _item_ref(item, str(item_id), raw_is_id=True),
                     }
                 )
     conditions: list[dict[str, Any]] = []
@@ -346,7 +365,9 @@ def canonical_knowledge(
             "difficulty": detail.get("difficulty"),
             "tags": detail.get("tags") or [],
             "upstream_updated_at": _text(detail.get("updateTime")),
-            "representative_hero": _entity_ref(representative, representative_id, "hero"),
+            "representative_hero": _entity_ref(
+                representative, representative_id, "hero", raw_is_id=True
+            ),
         },
         "boards": {"FINAL": final, "EARLY": early},
         "item_plans": plans,
@@ -365,6 +386,8 @@ def _entities(value: Any, id_key: str, name_key: str) -> list[RuntimeEntity]:
             _text(item.get("key")),
             _text(item.get(name_key)),
             _text(item.get("code")),
+            _text(item.get("type2")),
+            _text(item.get("effect") or item.get("desc")),
         )
         for item in value
         if isinstance(item, dict) and item.get(id_key) is not None
@@ -378,15 +401,55 @@ def _flatten(value: Any) -> list[Any]:
 
 
 def _entity_ref(
-    entity: RuntimeEntity | None, raw_token: str, kind: str = "entity"
+    entity: RuntimeEntity | None,
+    raw_token: str,
+    kind: str = "entity",
+    *,
+    raw_is_id: bool = False,
 ) -> dict[str, Any]:
     return {
-        f"external_{kind}_id": entity.external_id if entity else None,
+        f"external_{kind}_id": entity.external_id if entity else raw_token if raw_is_id else None,
         f"external_{kind}_key": entity.key if entity else None,
         "display_name": entity.name if entity else None,
         "resolution_status": "EXACT" if entity else "UNRESOLVED",
         "unresolved_raw_token": None if entity else raw_token,
+        "runtime_description": entity.description if entity else None,
     }
+
+
+def classify_item(
+    external_key: str | None,
+    runtime_type: str | None = None,
+    static_entity_type: str | None = None,
+    static_tags: list[str] | None = None,
+) -> ItemCategory:
+    """Classify only from stable upstream identifiers, types, and tags."""
+
+    kind = (runtime_type or "").casefold()
+    key = (external_key or "").casefold()
+    tags = set(static_tags or [])
+    if kind == "aoen" or key.startswith("da_artifact_") or "{44ace175}" in tags:
+        return ItemCategory.ARTIFACT
+    if kind == "guangming" or key.endswith("radiant") or "{ec243f6b}" in tags:
+        return ItemCategory.RADIANT
+    if kind.startswith("zhuanzhi") or static_entity_type == "emblem" or "emblem" in key:
+        return ItemCategory.EMBLEM
+    if kind == "part" or key.startswith("da_component_"):
+        return ItemCategory.COMPONENT
+    if kind == "common":
+        return ItemCategory.NORMAL
+    return ItemCategory.OTHER
+
+
+def _item_ref(
+    entity: RuntimeEntity | None, raw_token: str, *, raw_is_id: bool = False
+) -> dict[str, Any]:
+    ref = _entity_ref(entity, raw_token, "item", raw_is_id=raw_is_id)
+    ref["runtime_type"] = entity.runtime_type if entity else None
+    ref["item_category"] = classify_item(
+        entity.key if entity else None, entity.runtime_type if entity else None
+    ).value
+    return ref
 
 
 def _text(value: Any) -> str | None:

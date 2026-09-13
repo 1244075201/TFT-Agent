@@ -202,6 +202,24 @@ class SQLiteGameDataRepository:
             None,
         )
 
+    async def get_comp_items(self, snapshot_id: str, comp_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._get_comp_items_sync, snapshot_id, comp_id, None)
+
+    async def get_comp_items_by_category(
+        self, snapshot_id: str, comp_id: str, category: str
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._get_comp_items_sync, snapshot_id, comp_id, category)
+
+    async def get_item_definition(
+        self, snapshot_id: str, item_identity: str
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(
+            self._get_identity_definition_sync,
+            "datatft_item_identities",
+            snapshot_id,
+            item_identity,
+        )
+
     async def get_comp_conditions(self, snapshot_id: str, comp_id: str) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
             self._read_normalized_rows_sync,
@@ -220,6 +238,19 @@ class SQLiteGameDataRepository:
             comp_id,
             None,
             None,
+        )
+
+    async def get_comp_augments(self, snapshot_id: str, comp_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._get_comp_augments_sync, snapshot_id, comp_id)
+
+    async def get_augment_definition(
+        self, snapshot_id: str, augment_identity: str
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(
+            self._get_identity_definition_sync,
+            "datatft_augment_identities",
+            snapshot_id,
+            augment_identity,
         )
 
     async def get_comp_strategy_sections(
@@ -810,6 +841,26 @@ class SQLiteGameDataRepository:
             for plan in knowledge.get("item_plans") or []:
                 holder, item = plan.get("holder") or {}, plan.get("item") or {}
                 holder_id = holder.get("external_hero_id") or holder.get("unresolved_raw_token")
+                item_id = item.get("external_item_id") or item.get("unresolved_raw_token")
+                if item_id:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO datatft_item_identities VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            snapshot_id,
+                            item_id,
+                            item.get("external_item_key"),
+                            None,
+                            item.get("display_name"),
+                            item.get("item_category", "OTHER"),
+                            item.get("runtime_type"),
+                            item.get("runtime_description"),
+                            None,
+                            None,
+                            item.get("resolution_status", "UNRESOLVED"),
+                            item.get("unresolved_raw_token"),
+                        ),
+                    )
                 connection.execute(
                     "INSERT INTO datatft_comp_item_plan_items VALUES "
                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -854,6 +905,29 @@ class SQLiteGameDataRepository:
                     ),
                 )
             for index, item in enumerate(knowledge.get("hexes") or []):
+                hex_id = (
+                    item.get("external_entity_id")
+                    or item.get("external_hex_id")
+                    or item.get("unresolved_raw_token")
+                )
+                hex_key = item.get("external_entity_key") or item.get("external_hex_key")
+                if hex_id:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO datatft_augment_identities VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            snapshot_id,
+                            hex_id,
+                            hex_key,
+                            None,
+                            item.get("display_name"),
+                            item.get("runtime_description"),
+                            None,
+                            None,
+                            item.get("resolution_status", "UNRESOLVED"),
+                            item.get("unresolved_raw_token"),
+                        ),
+                    )
                 connection.execute(
                     "INSERT INTO datatft_comp_hexes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
@@ -861,8 +935,8 @@ class SQLiteGameDataRepository:
                         comp_id,
                         index,
                         item["source_kind"],
-                        item.get("external_entity_id") or item.get("external_hex_id"),
-                        item.get("external_entity_key") or item.get("external_hex_key"),
+                        hex_id,
+                        hex_key,
                         None,
                         item.get("display_name"),
                         item.get("resolution_status", "UNRESOLVED"),
@@ -894,6 +968,53 @@ class SQLiteGameDataRepository:
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            for table, key_column, canonical_column, kinds in (
+                (
+                    "datatft_item_identities",
+                    "external_item_key",
+                    "canonical_item_id",
+                    ("item", "emblem"),
+                ),
+                (
+                    "datatft_augment_identities",
+                    "external_hex_key",
+                    "canonical_augment_id",
+                    ("augment",),
+                ),
+            ):
+                marks = ",".join("?" for _ in kinds)
+                connection.execute(
+                    f"UPDATE {table} SET {canonical_column}=(SELECT canonical_id FROM "
+                    f"canonical_entities e WHERE e.canonical_id={table}.{key_column} "
+                    f"AND e.game_patch=? AND e.set_number=? AND e.entity_type IN ({marks})), "
+                    f"static_entity_id=(SELECT entity_id FROM static_entities s "
+                    f"WHERE s.entity_id={table}.{key_column} ORDER BY s.retrieved_at DESC LIMIT 1) "
+                    f"WHERE snapshot_id=? AND {key_column} IS NOT NULL",
+                    (game_patch, set_number, *kinds, snapshot_id),
+                )
+                connection.execute(
+                    f"UPDATE {table} SET definition_source=CASE "
+                    "WHEN EXISTS (SELECT 1 FROM static_entities s WHERE "
+                    f"s.entity_id={table}.static_entity_id AND LENGTH(s.description)>0) "
+                    "THEN 'communitydragon' WHEN runtime_description IS NOT NULL "
+                    "THEN 'datatft_runtime' ELSE NULL END, "
+                    "resolution_status=CASE "
+                    f"WHEN {canonical_column} IS NOT NULL THEN 'EXACT' "
+                    "WHEN static_entity_id IS NOT NULL THEN 'STATIC_ONLY' "
+                    "ELSE 'NO_STATIC_MATCH' END WHERE snapshot_id=?",
+                    (snapshot_id,),
+                )
+            connection.execute(
+                "UPDATE datatft_item_identities SET item_category=CASE "
+                "WHEN EXISTS (SELECT 1 FROM static_entities s WHERE "
+                "s.entity_id=static_entity_id AND s.entity_type='emblem') THEN 'EMBLEM' "
+                "WHEN EXISTS (SELECT 1 FROM static_entities s WHERE "
+                "s.entity_id=static_entity_id AND s.tags LIKE '%{44ace175}%') THEN 'ARTIFACT' "
+                "WHEN EXISTS (SELECT 1 FROM static_entities s WHERE "
+                "s.entity_id=static_entity_id AND s.tags LIKE '%{ec243f6b}%') THEN 'RADIANT' "
+                "ELSE item_category END WHERE snapshot_id=? AND item_category='OTHER'",
+                (snapshot_id,),
+            )
             for table, key_column, canonical_column, status_column, kinds in (
                 (
                     "datatft_comp_board_units",
@@ -974,6 +1095,121 @@ class SQLiteGameDataRepository:
         sql += " ORDER BY rowid"
         with self._connect() as connection:
             return [dict(row) for row in connection.execute(sql, params).fetchall()]
+
+    def _get_comp_items_sync(
+        self, snapshot_id: str, comp_id: str, category: str | None
+    ) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT p.*,i.item_category,i.runtime_type,i.static_entity_id,"
+            "i.runtime_description,i.definition_source,"
+            "i.resolution_status AS identity_resolution_status "
+            "FROM datatft_comp_item_plan_items p "
+            "JOIN datatft_item_identities i ON i.snapshot_id=p.snapshot_id "
+            "AND i.external_item_id=p.external_item_id "
+            "WHERE p.snapshot_id=? AND p.comp_id=?"
+        )
+        params: list[object] = [snapshot_id, comp_id]
+        if category is not None:
+            sql += " AND i.item_category=?"
+            params.append(category)
+        sql += " ORDER BY p.holder_external_hero_id,p.plan_index,p.slot_index"
+        with self._connect() as connection:
+            rows = [dict(row) for row in connection.execute(sql, params).fetchall()]
+            for row in rows:
+                row["definition"] = self._definition_sync(
+                    connection,
+                    row.get("static_entity_id"),
+                    row.get("runtime_description"),
+                    row.get("item_display_name"),
+                    row.get("definition_source"),
+                )
+        return rows
+
+    def _get_comp_augments_sync(self, snapshot_id: str, comp_id: str) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT a.*,i.static_entity_id,i.runtime_description,i.definition_source,"
+            "i.resolution_status AS identity_resolution_status "
+            "FROM datatft_comp_hexes a JOIN datatft_augment_identities i "
+            "ON i.snapshot_id=a.snapshot_id AND i.external_hex_id=a.external_hex_id "
+            "WHERE a.snapshot_id=? AND a.comp_id=? ORDER BY a.association_index"
+        )
+        with self._connect() as connection:
+            rows = [dict(row) for row in connection.execute(sql, (snapshot_id, comp_id)).fetchall()]
+            for row in rows:
+                row["definition"] = self._definition_sync(
+                    connection,
+                    row.get("static_entity_id"),
+                    row.get("runtime_description"),
+                    row.get("display_name"),
+                    row.get("definition_source"),
+                )
+        return rows
+
+    def _get_identity_definition_sync(
+        self, table: str, snapshot_id: str, identity: str
+    ) -> dict[str, Any] | None:
+        columns = {
+            "datatft_item_identities": ("external_item_id", "external_item_key"),
+            "datatft_augment_identities": ("external_hex_id", "external_hex_key"),
+        }
+        if table not in columns:
+            raise ValueError("unsupported identity table")
+        id_column, key_column = columns[table]
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT * FROM {table} WHERE snapshot_id=? "
+                f"AND ({id_column}=? OR {key_column}=?) LIMIT 1",
+                (snapshot_id, identity, identity),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["definition"] = self._definition_sync(
+                connection,
+                result.get("static_entity_id"),
+                result.get("runtime_description"),
+                result.get("display_name"),
+                result.get("definition_source"),
+            )
+            return result
+
+    @staticmethod
+    def _static_definition_sync(
+        connection: sqlite3.Connection, entity_id: object
+    ) -> dict[str, Any] | None:
+        if not entity_id:
+            return None
+        row = connection.execute(
+            "SELECT entity_id,entity_type,name,description,tags,source,source_url,data_version "
+            "FROM static_entities WHERE entity_id=? ORDER BY retrieved_at DESC LIMIT 1",
+            (entity_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["tags"] = json.loads(result["tags"])
+        return result
+
+    @classmethod
+    def _definition_sync(
+        cls,
+        connection: sqlite3.Connection,
+        static_entity_id: object,
+        runtime_description: object,
+        display_name: object,
+        definition_source: object,
+    ) -> dict[str, Any] | None:
+        static = cls._static_definition_sync(connection, static_entity_id)
+        if static is not None and static.get("description"):
+            return static
+        if runtime_description:
+            return {
+                "entity_id": static_entity_id,
+                "name": display_name,
+                "description": runtime_description,
+                "source": definition_source or "datatft_runtime",
+            }
+        return static
 
     def _activate_snapshot_sync(
         self,

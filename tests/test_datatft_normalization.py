@@ -7,16 +7,22 @@ from pathlib import Path
 import pytest
 
 from tft_agent.ingestion.datatft_normalization import (
+    ItemCategory,
     RuntimeCatalog,
     build_runtime_catalog,
     canonical_knowledge,
+    classify_item,
     decode_team_url,
 )
 from tft_agent.ingestion.sources.datatft import DataTFTSource
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
-from tft_agent.tft_mcp_server.schemas import CompStatsRecord, DataSnapshotMetadata
+from tft_agent.tft_mcp_server.schemas import (
+    CompStatsRecord,
+    DataSnapshotMetadata,
+    StaticEntityRecord,
+)
 
 
 def _catalog() -> RuntimeCatalog:
@@ -29,6 +35,27 @@ def _catalog() -> RuntimeCatalog:
             "equips18": [
                 {"equipId": 535, "key": "DA_InfinityEdge", "name": "无尽之刃", "code": "IE"},
                 {"equipId": 539, "key": "DA_GuinsoosRageblade", "name": "鬼索", "code": "GR"},
+                {
+                    "equipId": 30017,
+                    "key": "DA_Artifact_WitsEnd",
+                    "name": "智慧末刃",
+                    "code": "WI",
+                    "type2": "aoen",
+                },
+                {
+                    "equipId": 1519,
+                    "key": "DA_DeathbladeRadiant",
+                    "name": "光明死亡之刃",
+                    "code": "RD",
+                    "type2": "guangming",
+                },
+                {
+                    "equipId": 33032,
+                    "key": "DA_18_EmblemVanguard",
+                    "name": "重装战士纹章",
+                    "code": "EM",
+                    "type2": "zhuanzhi",
+                },
             ],
             "hexs18": [[{"hexId": 100, "key": "DA_Hex", "name": "强化", "code": "HX"}]],
         },
@@ -51,6 +78,7 @@ def test_official_team_url_semantics_decode_board_stars_items_and_hex() -> None:
         "display_name": "一号",
         "resolution_status": "EXACT",
         "unresolved_raw_token": None,
+        "runtime_description": None,
         "stars": 3,
         "is_main": None,
         "replace_id": None,
@@ -63,6 +91,9 @@ def test_official_team_url_semantics_decode_board_stars_items_and_hex() -> None:
                 "display_name": "无尽之刃",
                 "resolution_status": "EXACT",
                 "unresolved_raw_token": None,
+                "runtime_description": None,
+                "runtime_type": None,
+                "item_category": "OTHER",
             },
             {
                 "external_item_id": "539",
@@ -70,6 +101,9 @@ def test_official_team_url_semantics_decode_board_stars_items_and_hex() -> None:
                 "display_name": "鬼索",
                 "resolution_status": "EXACT",
                 "unresolved_raw_token": None,
+                "runtime_description": None,
+                "runtime_type": None,
+                "item_category": "OTHER",
             },
         ],
         "powerups": {},
@@ -92,6 +126,16 @@ def test_official_set18_pseudo_unit_fallback_code_is_decoded() -> None:
     assert decoded["issues"] == []
     assert decoded["units"][0]["external_hero_id"] == "999001"
     assert decoded["units"][0]["external_hero_key"] == "999001"
+
+
+def test_item_classification_uses_upstream_metadata_not_display_names() -> None:
+    assert classify_item("DA_Normal", "common") is ItemCategory.NORMAL
+    assert classify_item("DA_Artifact_Example") is ItemCategory.ARTIFACT
+    assert classify_item("DA_ExampleRadiant") is ItemCategory.RADIANT
+    assert classify_item("DA_18_EmblemExample") is ItemCategory.EMBLEM
+    assert classify_item("DA_Unknown") is ItemCategory.OTHER
+    assert classify_item("DA_Unknown", static_tags=["{44ace175}"]) is ItemCategory.ARTIFACT
+    assert classify_item("DA_Unknown", static_tags=["{ec243f6b}"]) is ItemCategory.RADIANT
 
 
 def test_early_and_final_boards_and_holder_without_name_are_normalized() -> None:
@@ -185,8 +229,19 @@ async def test_v2_storage_read_api_and_v1_compatibility(tmp_path: Path) -> None:
         {"id": "one"},
         {
             "title": "阵容",
-            "teamUrl": "https://www.datatft.com/team-builder/AAA",
-            "equips": [{"heroId": "918001", "equips": [["535"]]}],
+            "teamUrl": "https://www.datatft.com/team-builder/AAA|HX",
+            "equips": [
+                {
+                    "heroId": "918001",
+                    "equips": [["535", "30017", "1519", "33032"]],
+                }
+            ],
+            "tips": [
+                {
+                    "description": "强化提示",
+                    "labels": [{"type": "hex", "id": "100", "key": "DA_Hex"}],
+                }
+            ],
         },
         _catalog(),
     )
@@ -206,6 +261,28 @@ async def test_v2_storage_read_api_and_v1_compatibility(tmp_path: Path) -> None:
         retrieved_at=now,
         content_hash=digest,
     )
+    await repository.replace_static_entities(
+        [
+            StaticEntityRecord(
+                entity_id=key,
+                entity_type=entity_type,
+                name=name,
+                description=f"{name}效果",
+                tags=tags,
+                data_version="test",
+                source="communitydragon",
+                source_url="https://example.test/static",
+                retrieved_at=now,
+            )
+            for key, entity_type, name, tags in (
+                ("DA_InfinityEdge", "item", "无尽之刃", []),
+                ("DA_Artifact_WitsEnd", "item", "智慧末刃", ["{44ace175}"]),
+                ("DA_DeathbladeRadiant", "item", "光明死亡之刃", ["{ec243f6b}"]),
+                ("DA_18_EmblemVanguard", "emblem", "重装战士纹章", []),
+                ("DA_Hex", "augment", "强化", []),
+            )
+        ]
+    )
     await repository.store_candidate_snapshot(
         metadata,
         [CompStatsRecord(comp_id="one", name="阵容", snapshot=metadata)],
@@ -215,8 +292,27 @@ async def test_v2_storage_read_api_and_v1_compatibility(tmp_path: Path) -> None:
         "CANONICAL_INPUT_ONLY",
     )
     assert len(await repository.get_comp_board_units("v2", "one", "FINAL")) == 1
-    assert len(await repository.get_comp_item_plans("v2", "one")) == 1
+    assert len(await repository.get_comp_item_plans("v2", "one")) == 4
     assert await repository.get_comp_conditions("v2", "one") == []
+    await repository.resolve_datatft_normalized_entities("v2", "18.2", 18)
+    assert len(await repository.get_comp_items("v2", "one")) == 4
+    artifact = await repository.get_comp_items_by_category("v2", "one", "ARTIFACT")
+    radiant = await repository.get_comp_items_by_category("v2", "one", "RADIANT")
+    emblem = await repository.get_comp_items_by_category("v2", "one", "EMBLEM")
+    assert [
+        (row["holder_external_hero_id"], row["plan_index"], row["slot_index"]) for row in artifact
+    ] == [("918001", 1, 2)]
+    assert artifact[0]["definition"]["description"] == "智慧末刃效果"
+    assert radiant[0]["definition"]["description"] == "光明死亡之刃效果"
+    assert emblem[0]["definition"]["description"] == "重装战士纹章效果"
+    augments = await repository.get_comp_augments("v2", "one")
+    assert {row["source_kind"] for row in augments} == {"TEAM_URL", "TIP_LABEL"}
+    assert all(row["rank"] is None and row["priority"] is None for row in augments)
+    assert augments[0]["definition"]["description"] == "强化效果"
+    item_definition = await repository.get_item_definition("v2", "30017")
+    augment_definition = await repository.get_augment_definition("v2", "DA_Hex")
+    assert item_definition is not None and item_definition["item_category"] == "ARTIFACT"
+    assert augment_definition is not None and augment_definition["display_name"] == "强化"
 
     await repository.create_sync_run("legacy-run", "18.2", "cn", 18, "Set 18", now)
     legacy = metadata.model_copy(update={"snapshot_id": "v1"})
