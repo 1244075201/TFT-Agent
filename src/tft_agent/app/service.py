@@ -240,7 +240,7 @@ class AgentService:
             )
             if (
                 conversational_subject
-                and not explicit_subjects
+                and not resolution.entities
                 and unresolved_attempt is None
                 and not is_global_browse_query(request.text, product_mode)
                 and is_topic_compatible_query(request.text)
@@ -264,6 +264,8 @@ class AgentService:
             elif unresolved_attempt:
                 inheritance_blocked_reason = "explicit_unresolved_entity_attempt"
             elif explicit_subjects:
+                inheritance_blocked_reason = "current_explicit_resolved_entity"
+            elif resolution.entities:
                 inheritance_blocked_reason = "current_explicit_resolved_entity"
             elif is_global_browse_query(request.text, product_mode):
                 inheritance_blocked_reason = "current_global_browse_intent"
@@ -877,7 +879,10 @@ def _combination_relation_gaps(
 ) -> list[str]:
     if not (plan.target_comp or plan.candidate_comps):
         return []
-    section_by_type = {"emblem": "emblem", "item": "item_plan", "augment": "augment"}
+    section_by_type = {
+        "trait": "key_traits", "emblem": "emblem", "item": "item_plan",
+        "augment": "augment",
+    }
     gaps: list[str] = []
     for entity in plan.entities:
         section = section_by_type.get(entity.entity_type)

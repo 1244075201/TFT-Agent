@@ -80,6 +80,50 @@ async def test_inferno_emblem_and_ashe_are_resolved_as_separate_entities(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("query", "entity_type", "entity_name", "champion_name"),
+    [
+        ("地狱火艾希怎么玩", "trait", "地狱火", "艾希"),
+        ("地狱火转艾希怎么玩", "emblem", "地狱火纹章", "艾希"),
+        ("神谕阿狸怎么玩", "trait", "神谕", "阿狸"),
+        ("神谕转阿狸怎么玩", "emblem", "神谕纹章", "阿狸"),
+        ("重装雷恩加尔怎么玩", "trait", "重装战士", "雷恩加尔"),
+        ("重装转雷恩加尔怎么玩", "emblem", "重装战士纹章", "雷恩加尔"),
+    ],
+)
+async def test_trait_and_emblem_phrases_remain_distinct(
+    polish_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+    entity_type: str,
+    entity_name: str,
+    champion_name: str,
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(polish_settings)
+    events = await _ask(service, query, f"trait-emblem-{query}")
+    trace = _trace(service)
+    resolved = {(item.entity_type, item.display_name) for item in trace.resolved_entities}
+
+    assert (entity_type, entity_name) in resolved
+    assert ("champion", champion_name) in resolved
+    assert not any(item.entity_type == ("emblem" if entity_type == "trait" else "trait")
+                   for item in trace.resolved_entities)
+    assert [item.display_name for item in trace.understanding.mentioned_traits] == (
+        [entity_name] if entity_type == "trait" else []
+    )
+    assert trace.explicit_unresolved_term is None
+    assert trace.understanding.unresolved_terms == []
+    relation_gap = any("recognized entities lack exact relation" in gap
+                       for gap in trace.knowledge_gaps)
+    if relation_gap:
+        assert trace.llm_call_count == 0
+    assert "无法唯一识别" not in next(
+        event.message for event in events if event.type == "answer"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("query", "kind", "name"),
     [
         ("裁决转德莱文怎么玩", "emblem", "裁决使纹章"),
@@ -211,3 +255,36 @@ async def test_decision_prompt_closes_knowledge_gap_fact_boundary(
     prompt = completions.last_request["messages"][0]["content"]
     assert "不得发明候选路线或候选数量" in prompt
     assert "必须直接陈述缺口" in prompt
+    assert "只有MATCH_GUIDANCE才讨论对局状态是否缺失" in prompt
+
+
+@pytest.mark.asyncio
+async def test_general_guide_context_does_not_frame_empty_match_state_as_a_gap(
+    polish_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(polish_settings)
+    await _ask(service, "艾希怎么玩", "general-wording")
+    trace = _trace(service)
+
+    assert len(trace.understanding.candidate_comps) > 1
+    assert "USER FACTS" not in trace.clean_context_summary
+    assert "No structured facts provided" not in trace.clean_context_summary
+    assert "CONTEXT GAPS" not in trace.clean_context_summary
+
+
+def test_match_guidance_context_keeps_empty_state_visibility() -> None:
+    state = service_module.GameState(user_question="这局怎么玩")
+    understanding = service_module.understand_query(
+        "这局怎么玩", state, ProductMode.MATCH_GUIDANCE
+    )
+    plan = service_module.build_retrieval_plan(
+        understanding, state, "18.2", 18, "Enchanted Wilds", "snapshot"
+    )
+    summary = AnswerContext(
+        question="这局怎么玩", understanding=understanding,
+        game_state=state, retrieval_plan=plan,
+    ).readable_summary()
+
+    assert "USER FACTS" in summary
+    assert "No structured facts provided" in summary

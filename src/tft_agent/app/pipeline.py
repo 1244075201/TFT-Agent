@@ -73,6 +73,7 @@ class QueryStateUnderstanding(StrictModel):
     product_mode: ProductMode
     decision_terms: list[str] = Field(default_factory=list)
     resolved_entities: list[ResolvedEntity] = Field(default_factory=list)
+    mentioned_traits: list[ResolvedEntity] = Field(default_factory=list)
     target_comp: ResolvedEntity | None = None
     candidate_comps: list[ResolvedEntity] = Field(default_factory=list)
     state_mutation: StateMutationIntent = StateMutationIntent.RETAIN
@@ -177,9 +178,13 @@ class AnswerContext(StrictModel):
         blocks = [
             "USER QUESTION\n" + self.question.strip(),
             "ACTIVE PATCH\n- " + self.retrieval_plan.game_patch,
-            "USER FACTS\n" + ("\n".join(f"- {key}: {value}" for key, value in facts.items())
-                                if facts else "- No structured facts provided"),
         ]
+        if self.understanding.product_mode == ProductMode.MATCH_GUIDANCE:
+            blocks.append(
+                "USER FACTS\n"
+                + ("\n".join(f"- {key}: {value}" for key, value in facts.items())
+                   if facts else "- No structured facts provided")
+            )
         targets = ([self.retrieval_plan.target_comp]
                    if self.retrieval_plan.target_comp else self.retrieval_plan.candidate_comps)
         if targets or self.retrieval_plan.target_champion:
@@ -278,6 +283,7 @@ def understand_query(
         product_mode=mode,
         decision_terms=decision_terms,
         resolved_entities=entities,
+        mentioned_traits=[item for item in entities if item.entity_type == "trait"],
         target_comp=target,
         candidate_comps=candidates,
         state_mutation=mutation,
@@ -321,7 +327,9 @@ def unresolved_entity_fragment(
 ) -> str | None:
     """Return only uncovered subject text after all deterministic entity mentions."""
     remainder = EntityTextNormalizer.normalize(term)
-    subject_entity_types = {"champion", "composition", "emblem", "item", "augment"}
+    subject_entity_types = {
+        "champion", "composition", "trait", "emblem", "item", "augment",
+    }
     mentions = sorted(
         {
             EntityTextNormalizer.normalize(item.matched_alias)
@@ -383,6 +391,8 @@ def build_retrieval_plan(
             needs.append("emblem")
         needs.extend(["emblem_definition", "key_traits", "composition_emblem_advice",
                       "transition", "flex", "conditional_advice"])
+    if any(item.entity_type == "trait" for item in other):
+        needs.append("key_traits")
     if any(item.entity_type == "augment" for item in other):
         if target or candidates:
             needs.append("augment")

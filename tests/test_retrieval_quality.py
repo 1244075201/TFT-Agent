@@ -418,8 +418,6 @@ async def test_general_guide_conversational_subject_precedence(
 @pytest.mark.parametrize(
     ("first_query", "second_query", "attempt", "forbidden"),
     [
-        ("螳螂怎么玩", "地狱火怎么玩", "地狱火", ["卡兹克"]),
-        ("狮子狗怎么玩", "地狱火怎么玩", "地狱火", ["雷恩加尔", "重装狮子狗"]),
         ("德莱文95怎么玩", "XXXXX怎么玩", "XXXXX", ["德莱文95"]),
     ],
 )
@@ -443,6 +441,36 @@ async def test_explicit_unresolved_entity_blocks_subject_inheritance(
     assert trace.inheritance_blocked_reason == "explicit_unresolved_entity_attempt"
     assert trace.conversational_subject is None
     assert trace.final_resolution_category.value == "unresolved_entity"
+    answer = next(event.message for event in events if event.type == "answer")
+    assert all(value not in answer for value in forbidden)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_query", "forbidden"),
+    [
+        ("螳螂怎么玩", ["卡兹克"]),
+        ("狮子狗怎么玩", ["雷恩加尔", "重装狮子狗"]),
+    ],
+)
+async def test_explicit_trait_blocks_unrelated_subject_inheritance(
+    retrieval_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    first_query: str,
+    forbidden: list[str],
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    await _ask_general(service, first_query, "explicit-trait")
+    events = await _ask_general(service, "地狱火怎么玩", "explicit-trait")
+    trace = _trace(service)
+
+    assert any(item.entity_type == "trait" and item.display_name == "地狱火"
+               for item in trace.resolved_entities)
+    assert trace.explicit_unresolved_term is None
+    assert trace.subject_inherited is False
+    assert trace.inheritance_blocked_reason == "current_explicit_resolved_entity"
+    assert trace.conversational_subject is None
     answer = next(event.message for event in events if event.type == "answer")
     assert all(value not in answer for value in forbidden)
 

@@ -49,6 +49,8 @@ class GroundedDecisionClient:
                     "候选数量，不得把历史对话、知识缺口或一般常识改写成当前用户状态。"
                     "若KNOWLEDGE GAPS指出已识别实体之间缺少relation，必须直接陈述缺口；"
                     "任何超出证据的建议都必须以‘如果’开头并明确标成假设。"
+                    "GENERAL_GUIDE是版本攻略咨询：不要把没有个人对局信息、没有结构化"
+                    "GameState描述成问题；只有MATCH_GUIDANCE才讨论对局状态是否缺失。"
                     "返回JSON：recommendation、reasoning、next_steps，以及可选的alternatives和"
                     "missing_information。只有确有不同选择时才给alternatives。不得调用工具，"
                     "不得编造上下阵单位、数值或知识库未提供的事实。"

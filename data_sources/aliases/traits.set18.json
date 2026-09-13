@@ -1,0 +1,5 @@
+{
+  "aliases": [
+    {"aliases":["重装"],"entity_type":"trait","canonical_name":"重装战士","canonical_id":"DA_18_Vanguard","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"}
+  ]
+}
