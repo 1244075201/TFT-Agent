@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -92,7 +93,7 @@ async def test_match_strategy_proceeds_with_zero_resolved_entities(
     assert trace.original_query == "我现在该怎么玩"
     assert trace.retrieval_queries[0] == "我现在该怎么玩"
     assert trace.game_state_present is True
-    assert any(call.operation == "search_normalized_knowledge"
+    assert any(call.operation == "hybrid_normalized_retrieval"
                for call in trace.repository_calls)
     assert trace.retrieved_knowledge.evidence
     assert all(item.source_patch == "18.2" for item in trace.retrieved_knowledge.evidence)
@@ -159,3 +160,118 @@ async def test_general_guide_does_not_receive_saved_match_state(
     assert trace.game_state_present is False
     assert "5-1" not in trace.clean_context_summary
     assert "30金币" not in trace.clean_context_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expanded_trait"),
+    [
+        ("开局有森林转怎么构筑", "永恒之森"),
+        ("开局有地狱火纹章怎么构筑", "地狱火"),
+    ],
+)
+async def test_trait_and_emblem_reverse_retrieval_generate_candidates(
+    retrieval_first_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+    expanded_trait: str,
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_first_settings)
+    await _ask(service, query, "trait-reverse-" + expanded_trait, ProductMode.GENERAL_GUIDE)
+    trace = _trace(service)
+    assert any(item.get("expanded_trait") == expanded_trait
+               for item in trace.structured_expansions)
+    assert trace.structured_candidate_comps
+    assert any(item.section == "candidate_composition"
+               for item in trace.retrieved_knowledge.evidence)
+    assert any(item.section in {"starting_conditions", "core", "early_game", "mid_game",
+                                "late_game"}
+               for item in trace.retrieved_knowledge.evidence)
+    assert trace.llm_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_artifact_reverse_retrieval_includes_holders_and_compositions(
+    retrieval_first_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_first_settings)
+    await _ask(
+        service, "开局有鱼骨头怎么构筑", "artifact-reverse", ProductMode.GENERAL_GUIDE
+    )
+    trace = _trace(service)
+    assert any(item.get("relation") == "item_to_holder_to_composition"
+               for item in trace.structured_expansions)
+    assert trace.structured_candidate_comps
+    relations = [item for item in trace.retrieved_knowledge.evidence
+                 if item.section == "structured_relation"]
+    assert relations and any("鱼骨头" in str(item.semantic_content) for item in relations)
+    assert any("holder" in str(item.get("signals"))
+               for item in trace.structured_candidate_comps)
+
+
+@pytest.mark.asyncio
+async def test_augment_reverse_retrieval_generates_associated_compositions(
+    retrieval_first_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    with sqlite3.connect(retrieval_first_settings.database_path) as connection:
+        row = connection.execute(
+            "SELECT display_name FROM datatft_comp_hexes "
+            "WHERE snapshot_id=(SELECT active_snapshot_id FROM game_patches "
+            "WHERE game_patch='18.2') AND canonical_augment_id IS NOT NULL "
+            "GROUP BY canonical_augment_id,display_name HAVING COUNT(DISTINCT comp_id)>0 LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    augment_name = str(row[0])
+    service = AgentService(retrieval_first_settings)
+    await _ask(
+        service, f"开局有{augment_name}可以玩什么", "augment-reverse",
+        ProductMode.GENERAL_GUIDE,
+    )
+    trace = _trace(service)
+    assert any(item.get("relation") == "augment_to_composition"
+               for item in trace.structured_expansions)
+    assert trace.structured_candidate_comps
+    assert trace.llm_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_recommend_twenty_comps_uses_structured_list_without_strategy_noise(
+    retrieval_first_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_first_settings)
+    events = await _ask(
+        service, "现在这个版本你推荐20套阵容", "twenty-comps", ProductMode.GENERAL_GUIDE
+    )
+    trace = _trace(service)
+    comps = [item for item in trace.retrieved_knowledge.evidence
+             if item.section == "composition"]
+    assert trace.retrieval_first_strategy is False
+    assert len(comps) == 20
+    assert {item.section for item in trace.retrieved_knowledge.evidence} == {"composition"}
+    assert trace.llm_call_count == 0
+    assert "按数据库 tier 优先列出的阵容" in events[-1].message
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_fire_emblem_does_not_pull_unrelated_fallback_comps(
+    retrieval_first_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_first_settings)
+    await _ask(
+        service, "开局有火转怎么构筑", "ambiguous-fire", ProductMode.GENERAL_GUIDE
+    )
+    trace = _trace(service)
+    assert trace.retrieval_first_strategy is True
+    assert trace.structured_seeds == []
+    assert trace.structured_candidate_comps == []
+    assert trace.retrieved_knowledge.evidence == []
+    assert trace.knowledge_gaps == [
+        "no relevant evidence found in active normalized knowledge",
+        "no unique structured entity seed was resolved; request the full entity name",
+    ]
+    assert trace.llm_call_count == 1

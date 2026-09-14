@@ -328,12 +328,23 @@ class AgentService:
             )
             plan_end = perf_counter()
             retrieval_queries: list[str] = []
+            structured_seeds: list[dict[str, str]] = []
+            structured_metadata: dict[str, Any] = {}
             if retrieval_first:
+                seed_entities = list(resolution.entities)
+                if scope.uses_game_state:
+                    state_seed_text = _state_relation_seed_text(state)
+                    if state_seed_text:
+                        state_resolution = await self._resolver(active_context).resolve(
+                            state_seed_text
+                        )
+                        seed_entities.extend(state_resolution.entities)
+                structured_seeds = _structured_seed_records(seed_entities)
                 retrieval_queries = _broad_retrieval_queries(
-                    request.text, state if scope.uses_game_state else None, resolution.entities
+                    request.text, state if scope.uses_game_state else None, seed_entities
                 )
-                knowledge, calls = await self._retrieve_broad_strategy(
-                    retrieval_queries, plan
+                knowledge, calls, structured_metadata = await self._retrieve_broad_strategy(
+                    retrieval_queries, structured_seeds, plan
                 )
             else:
                 knowledge, calls = await self._retrieve(request.text, plan)
@@ -373,6 +384,13 @@ class AgentService:
                 retrieved_evidence_kinds=list(dict.fromkeys(
                     item.section for item in knowledge.evidence
                 )),
+                text_retrieval_hits=int(structured_metadata.get("text_hits", 0)),
+                structured_seeds=structured_seeds,
+                structured_expansions=list(structured_metadata.get("expansions", [])),
+                structured_candidate_comps=list(
+                    structured_metadata.get("candidate_comps", [])
+                ),
+                evidence_counts_by_type=_evidence_counts(knowledge.evidence),
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -428,35 +446,81 @@ class AgentService:
     async def _retrieve_broad_strategy(
         self,
         queries: list[str],
+        seeds: list[dict[str, str]],
         plan: RetrievalPlan,
-    ) -> tuple[RetrievedKnowledge, list[RepositoryCall]]:
+    ) -> tuple[RetrievedKnowledge, list[RepositoryCall], dict[str, Any]]:
         started = perf_counter()
-        rows = await self._repo().search_normalized_knowledge(
-            plan.active_snapshot_id, plan.game_patch, queries, limit=12
+        text_rows, structured = await asyncio.gather(
+            self._repo().search_normalized_knowledge(
+                plan.active_snapshot_id, plan.game_patch, queries, limit=12
+            ),
+            self._repo().expand_normalized_relations(
+                plan.active_snapshot_id, plan.game_patch, seeds, candidate_limit=4
+            ),
         )
+        raw_structured_rows = structured.get("evidence", [])
+        structured_rows = (
+            list(raw_structured_rows) if isinstance(raw_structured_rows, list) else []
+        )
+        raw_candidates = structured.get("candidate_comps", [])
+        candidate_rows = raw_candidates if isinstance(raw_candidates, list) else []
+        candidate_ids = {
+            str(item.get("comp_id")) for item in candidate_rows if isinstance(item, dict)
+        }
+        candidate_ids.update(
+            item.canonical_id for item in (
+                [plan.target_comp] if plan.target_comp else plan.candidate_comps
+            ) if item is not None
+        )
+        seed_names = [_normalized(seed["display_name"]) for seed in seeds]
+        seed_names.extend(
+            _normalized(seed["display_name"].removesuffix("纹章"))
+            for seed in seeds
+            if seed["entity_type"] == "emblem" and seed["display_name"].endswith("纹章")
+        )
+        if candidate_ids:
+            text_rows = [row for row in text_rows if (
+                str(row.get("comp_id")) in candidate_ids
+                or any(name and name in _normalized(str(row.get("display_name") or ""))
+                       for name in seed_names)
+            )]
+        rows = [*structured_rows, *text_rows]
+        unique_rows = {str(row["evidence_id"]): row for row in rows}
         call = RepositoryCall(
-            operation="search_normalized_knowledge",
+            operation="hybrid_normalized_retrieval",
             filters={
                 "queries": queries,
+                "structured_seeds": seeds,
                 "game_patch": plan.game_patch,
                 "snapshot_id": plan.active_snapshot_id,
-                "limit": 12,
+                "text_limit": 12,
+                "candidate_limit": 4,
             },
-            result_count=len(rows),
+            result_count=len(unique_rows),
             latency_ms=(perf_counter() - started) * 1000,
         )
         evidence = [EvidenceRecord(
             requested_patch=plan.game_patch,
             **row,
-        ) for row in rows]
+        ) for row in unique_rows.values()]
         gaps = [] if evidence else [
             "no relevant evidence found in active normalized knowledge"
         ]
+        if not evidence and not seeds:
+            gaps.append(
+                "no unique structured entity seed was resolved; request the full entity name"
+            )
         if evidence and all(item.section == "definition" for item in evidence):
             gaps.append(
                 "retrieval found entity definitions but no composition strategy relation"
             )
-        return RetrievedKnowledge(evidence=evidence, knowledge_gaps=gaps), [call]
+        metadata = {
+            "text_hits": len(text_rows),
+            "structured_hits": len(structured_rows),
+            "expansions": structured.get("expansions", []),
+            "candidate_comps": candidate_rows,
+        }
+        return RetrievedKnowledge(evidence=evidence, knowledge_gaps=gaps), [call], metadata
 
     async def _conversation_subject(
         self, rows: list[tuple[str, str]], context: ActivePatchContext
@@ -599,12 +663,15 @@ class AgentService:
                 )
         if not requested_comps and plan.retrieve_all_comps:
             start = perf_counter()
-            comps = await self._repo().search_comps(None, plan.game_patch, 50)
+            comps = await self._repo().search_comps(
+                None, plan.game_patch, plan.composition_limit
+            )
             if plan.tier_filter:
                 comps = [comp for comp in comps if comp.tier in plan.tier_filter]
-            comps = comps[:8]
+            comps = comps[:plan.composition_limit]
             calls.append(RepositoryCall(
-                operation="browse_comps", filters={"game_patch": plan.game_patch, "limit": 8},
+                operation="browse_comps",
+                filters={"game_patch": plan.game_patch, "limit": plan.composition_limit},
                 result_count=len(comps), latency_ms=(perf_counter() - start) * 1000,
             ))
             for comp in comps:
@@ -793,6 +860,46 @@ def _has_game_state(state: GameState) -> bool:
     return bool(state.model_dump(
         exclude={"user_question"}, exclude_none=True, exclude_defaults=True
     ))
+
+
+def _state_relation_seed_text(state: GameState) -> str:
+    values = [
+        *state.items, *state.item_components, *state.completed_items,
+        *state.artifacts, *state.radiant_items, *state.emblems,
+        *state.augments, *state.augment_choices,
+    ]
+    return " ".join(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _structured_seed_records(
+    entities: list[ResolvedEntity],
+) -> list[dict[str, str]]:
+    seeds: dict[tuple[str, str], dict[str, str]] = {}
+    for entity in entities:
+        if entity.entity_type not in {"trait", "emblem", "item", "artifact", "augment"}:
+            continue
+        key = (entity.entity_type, entity.canonical_id)
+        seeds[key] = {
+            "entity_type": entity.entity_type,
+            "canonical_id": entity.canonical_id,
+            "display_name": entity.display_name,
+            "matched_alias": entity.matched_alias,
+        }
+    return list(seeds.values())
+
+
+def _evidence_counts(evidence: list[EvidenceRecord]) -> dict[str, int]:
+    categories = {
+        "composition": "DIRECT FACT",
+        "definition": "STATIC DEFINITION",
+        "structured_relation": "STRUCTURED RELATION",
+        "candidate_composition": "CANDIDATE COMPOSITION",
+    }
+    output: dict[str, int] = {}
+    for item in evidence:
+        category = categories.get(item.section, "STRATEGY TEXT")
+        output[category] = output.get(category, 0) + 1
+    return output
 
 
 def _broad_retrieval_queries(
@@ -1133,7 +1240,7 @@ def _deterministic_answer(
     if understanding and understanding.knowledge_intent == KnowledgeIntent.COMPOSITION_BROWSE:
         comps = list(dict.fromkeys(item.display_name for item in knowledge.evidence
                                    if item.entity_type == "composition"))
-        label = "S级阵容" if plan and plan.tier_filter else "强势阵容"
+        label = "S级阵容" if plan and plan.tier_filter else "按数据库 tier 优先列出的阵容"
         message = f"当前版本 {patch} {label}：" + "、".join(comps) if comps else (
             f"本地数据库没有找到 {patch} 的对应阵容事实。"
         )

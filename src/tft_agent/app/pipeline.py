@@ -100,6 +100,7 @@ class RetrievalPlan(StrictModel):
     active_snapshot_id: str = ""
     target_champion: ResolvedEntity | None = None
     comparison_requested: bool = False
+    composition_limit: int = Field(default=8, ge=1, le=50)
 
 
 class EvidenceRecord(StrictModel):
@@ -163,6 +164,11 @@ class RetrievalTrace(StrictModel):
     game_state_present: bool = False
     retrieval_queries: list[str] = Field(default_factory=list)
     retrieved_evidence_kinds: list[str] = Field(default_factory=list)
+    text_retrieval_hits: int = 0
+    structured_seeds: list[dict[str, str]] = Field(default_factory=list)
+    structured_expansions: list[dict[str, Any]] = Field(default_factory=list)
+    structured_candidate_comps: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_counts_by_type: dict[str, int] = Field(default_factory=dict)
 
 
 class AnswerContext(StrictModel):
@@ -259,7 +265,7 @@ class AnswerContext(StrictModel):
 _DECISION_TERMS = (
     "怎么玩", "如何", "为什么", "推荐", "比较", "哪个好", "选择", "怎么选", "选哪个",
     "判断", "该不该", "要不要", "怎么办", "转阵", "变阵", "运营", "过渡", "搜牌",
-    "给谁", "适合", "建议", "玩什么", "调整", "should", "recommend", "why", "how",
+    "给谁", "适合", "建议", "玩什么", "调整", "构筑", "should", "recommend", "why", "how",
     "choose", "compare", "versus", " vs ",
 )
 _BROWSE_TERMS = ("强势阵容", "推荐几套", "s级阵容", "阵容榜", "meta阵容", "版本阵容")
@@ -270,10 +276,22 @@ _FACT_TERMS = (
 )
 
 
+def structured_composition_list_limit(text: str) -> int | None:
+    """Return an explicit deterministic composition-list limit."""
+    match = re.search(r"(?:推荐|给我|列出?)\s*(\d{1,2})\s*套阵容", text, re.I)
+    if match:
+        return min(50, max(1, int(match.group(1))))
+    if re.search(r"当前(?:版本)?有哪些阵容|版本阵容榜|s\s*级阵容", text, re.I):
+        return 20
+    return None
+
+
 def is_strategy_open_query(text: str, mode: ProductMode) -> bool:
     """Route open strategy language without requiring an entity parse."""
     lowered = text.casefold()
     if mode == ProductMode.COMP_BROWSER:
+        return False
+    if structured_composition_list_limit(text) is not None:
         return False
     if any(term in lowered for term in _FACT_TERMS):
         return False
@@ -295,6 +313,8 @@ def understand_query(
     lowered = text.casefold()
     decision_terms = [term for term in _DECISION_TERMS if term in lowered]
     browse = mode == ProductMode.COMP_BROWSER or any(term in lowered for term in _BROWSE_TERMS)
+    list_limit = structured_composition_list_limit(text)
+    browse = browse or list_limit is not None
     factual = any(term in lowered for term in _FACT_TERMS) and not decision_terms
     general_knowledge = bool(re.search(
         r"(?:常见|都有哪些).*(?:装备|强化)|(?:装备|强化).*(?:常见|有哪些)", lowered
@@ -322,7 +342,8 @@ def understand_query(
                 if entities and not compositions else ResolutionCategory.RESOLVED_STRATEGY)
     return QueryStateUnderstanding(
         kind=(QueryKind.DETERMINISTIC_LOOKUP
-            if unresolved or factual or general_knowledge or (browse and not decision_terms)
+            if unresolved or factual or general_knowledge or list_limit is not None
+            or (browse and not decision_terms)
               else QueryKind.STRATEGY_DECISION),
         product_mode=mode,
         decision_terms=decision_terms,
@@ -459,6 +480,7 @@ def build_retrieval_plan(
         active_snapshot_id=active_snapshot_id,
         target_champion=champion,
         comparison_requested=_comparison_requested(question),
+        composition_limit=structured_composition_list_limit(question) or 8,
     )
 
 

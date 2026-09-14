@@ -26,6 +26,7 @@ from tft_agent.tft_mcp_server.schemas import (
 _OPEN_QUERY_STOP_WORDS = {
     "我", "现在", "当前", "该", "怎么", "怎么玩", "怎么办", "干嘛", "下一步",
     "干什么", "做什么", "这把", "这局", "运营", "处理", "一下", "请问",
+    "开局", "有", "构筑",
 }
 
 
@@ -37,7 +38,9 @@ def _normalized_search_terms(queries: list[str]) -> list[str]:
     terms: list[str] = []
     for query in queries:
         normalized = _search_normalize(query)
-        if normalized and normalized not in _OPEN_QUERY_STOP_WORDS:
+        for stop_word in sorted(_OPEN_QUERY_STOP_WORDS, key=len, reverse=True):
+            normalized = normalized.replace(stop_word, "")
+        if len(normalized) >= 2:
             terms.append(normalized)
         for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", query):
             token = _search_normalize(token)
@@ -88,6 +91,48 @@ def _normalized_search_document(
         ),
         "source_url": str(source_url) if source_url else None,
     }
+
+
+def _relation_search_document(
+    snapshot_id: str,
+    game_patch: str,
+    source_url: str,
+    comp_id: object,
+    comp_name: object,
+    section: str,
+    canonical_id: object,
+    semantic_content: str | dict[str, object],
+    suffix: str,
+    *,
+    source_response_id: object = None,
+) -> dict[str, object]:
+    return {
+        "evidence_id": "normalized-relation:" + suffix,
+        "source": "DataTFT normalized relation",
+        "source_patch": game_patch,
+        "patch_match": "exact",
+        "entity_type": "composition",
+        "canonical_entity_id": str(comp_id),
+        "display_name": str(comp_name),
+        "section": section,
+        "semantic_content": semantic_content,
+        "relevance_score": 1.0,
+        "url": source_url,
+        "snapshot_id": snapshot_id,
+        "comp_id": str(comp_id),
+        "source_response_id": (
+            str(source_response_id) if source_response_id is not None else None
+        ),
+        "resolution_status": "RESOLVED",
+    }
+
+
+def _candidate_has_seed(candidate: dict[str, object], seed_name: str) -> bool:
+    signals = candidate.get("signals")
+    return isinstance(signals, list) and any(
+        isinstance(signal, dict) and signal.get("seed") == seed_name
+        for signal in signals
+    )
 
 
 class SQLiteGameDataRepository:
@@ -421,6 +466,22 @@ class SQLiteGameDataRepository:
             game_patch,
             list(queries),
             limit,
+        )
+
+    async def expand_normalized_relations(
+        self,
+        snapshot_id: str,
+        game_patch: str,
+        seeds: Sequence[dict[str, str]],
+        candidate_limit: int = 5,
+    ) -> dict[str, object]:
+        """Reverse active-snapshot relations for soft retrieval seeds."""
+        return await asyncio.to_thread(
+            self._expand_normalized_relations_sync,
+            snapshot_id,
+            game_patch,
+            list(seeds),
+            candidate_limit,
         )
 
     async def rebuild_canonical_catalog(
@@ -1759,7 +1820,7 @@ class SQLiteGameDataRepository:
             float(str(item["relevance_score"])),
             item["section"] in {"core", "tip", "composition"},
         ), reverse=True)
-        if not ranked:
+        if not ranked and not query_terms:
             fallbacks = [doc for doc in documents if doc["section"] == "composition"][:limit]
             for document in fallbacks:
                 document.pop("source_url", None)
@@ -1782,6 +1843,202 @@ class SQLiteGameDataRepository:
             if len(selected) >= limit:
                 break
         return selected
+
+    def _expand_normalized_relations_sync(
+        self,
+        snapshot_id: str,
+        game_patch: str,
+        seeds: list[dict[str, str]],
+        candidate_limit: int,
+    ) -> dict[str, object]:
+        """Build reverse relations without making them a strategy ranking."""
+        with self._connect() as connection:
+            snapshot = connection.execute(
+                "SELECT source_url FROM datatft_snapshots "
+                "WHERE snapshot_id=? AND game_patch=?",
+                (snapshot_id, game_patch),
+            ).fetchone()
+            if snapshot is None:
+                return {"evidence": [], "expansions": [], "candidate_comps": []}
+            source_url = str(snapshot["source_url"])
+            candidate_signals: dict[str, dict[str, object]] = {}
+            relation_documents: list[dict[str, object]] = []
+            expansions: list[dict[str, object]] = []
+
+            def add_candidate(
+                row: sqlite3.Row,
+                relation_kind: str,
+                seed_name: str,
+                signal: dict[str, object],
+            ) -> None:
+                comp_id = str(row["comp_id"])
+                entry = candidate_signals.setdefault(comp_id, {
+                    "comp_id": comp_id,
+                    "name": str(row["name"]),
+                    "tier": row["tier"],
+                    "signals": [],
+                    "trait_coverage_count": 0,
+                })
+                signals = entry["signals"]
+                assert isinstance(signals, list)
+                signals.append({
+                    "relation_kind": relation_kind,
+                    "seed": seed_name,
+                    **signal,
+                })
+                if relation_kind == "trait_roster_overlap":
+                    entry["trait_coverage_count"] = max(
+                        int(str(entry["trait_coverage_count"])),
+                        int(str(signal.get("overlap_count", 0))),
+                    )
+
+            for seed in seeds:
+                entity_type = seed.get("entity_type", "")
+                canonical_id = seed.get("canonical_id", "")
+                display_name = seed.get("display_name", "")
+                if not display_name:
+                    continue
+                if entity_type in {"trait", "emblem"}:
+                    trait_name = (
+                        display_name.removesuffix("纹章")
+                        if entity_type == "emblem" else display_name
+                    )
+                    rows = connection.execute(
+                        "SELECT c.comp_id,c.name,c.tier,"
+                        "COUNT(DISTINCT b.board_index) overlap_count,"
+                        "GROUP_CONCAT(DISTINCT b.display_name) holders "
+                        "FROM datatft_comp_board_units b JOIN datatft_comps c "
+                        "ON c.snapshot_id=b.snapshot_id AND c.comp_id=b.comp_id "
+                        "JOIN static_entities s ON s.entity_id=b.canonical_champion_id "
+                        "AND s.retrieved_at=(SELECT MAX(s2.retrieved_at) "
+                        "FROM static_entities s2 WHERE s2.entity_id=b.canonical_champion_id) "
+                        "WHERE b.snapshot_id=? AND b.board_phase='FINAL' AND s.traits LIKE ? "
+                        "GROUP BY c.comp_id,c.name,c.tier",
+                        (snapshot_id, f'%"{trait_name}"%'),
+                    ).fetchall()
+                    expansions.append({
+                        "seed": display_name,
+                        "relation": "emblem_to_trait" if entity_type == "emblem" else "trait",
+                        "expanded_trait": trait_name,
+                        "candidate_count": len(rows),
+                    })
+                    for row in rows:
+                        add_candidate(row, "trait_roster_overlap", display_name, {
+                            "trait": trait_name,
+                            "overlap_count": int(row["overlap_count"]),
+                            "champions": str(row["holders"] or "").split(","),
+                        })
+                elif entity_type in {"item", "artifact"}:
+                    rows = connection.execute(
+                        "SELECT c.comp_id,c.name,c.tier,p.holder_display_name,p.plan_index,"
+                        "p.slot_index,p.item_display_name,i.item_category "
+                        "FROM datatft_comp_item_plan_items p JOIN datatft_comps c "
+                        "ON c.snapshot_id=p.snapshot_id AND c.comp_id=p.comp_id "
+                        "JOIN datatft_item_identities i ON i.snapshot_id=p.snapshot_id "
+                        "AND i.external_item_id=p.external_item_id "
+                        "WHERE p.snapshot_id=? AND (p.canonical_item_id=? "
+                        "OR p.item_display_name=? COLLATE NOCASE)",
+                        (snapshot_id, canonical_id, display_name),
+                    ).fetchall()
+                    expansions.append({
+                        "seed": display_name,
+                        "relation": "item_to_holder_to_composition",
+                        "candidate_count": len({str(row['comp_id']) for row in rows}),
+                    })
+                    for index, row in enumerate(rows):
+                        add_candidate(row, "item_holder_plan", display_name, {
+                            "holder": row["holder_display_name"],
+                            "item_category": row["item_category"],
+                            "plan_index": row["plan_index"],
+                            "slot_index": row["slot_index"],
+                        })
+                        relation_documents.append(_relation_search_document(
+                            snapshot_id, game_patch, source_url, row["comp_id"], row["name"],
+                            "structured_relation", canonical_id or display_name,
+                            f"{row['item_display_name']} → {row['holder_display_name']} → "
+                            f"{row['name']}（装备方案{int(row['plan_index']) + 1}，"
+                            f"槽位{int(row['slot_index']) + 1}）",
+                            f"item:{canonical_id or display_name}:{index}",
+                        ))
+                elif entity_type == "augment":
+                    rows = connection.execute(
+                        "SELECT c.comp_id,c.name,c.tier,h.display_name,h.source_kind "
+                        "FROM datatft_comp_hexes h JOIN datatft_comps c "
+                        "ON c.snapshot_id=h.snapshot_id AND c.comp_id=h.comp_id "
+                        "WHERE h.snapshot_id=? AND (h.canonical_augment_id=? "
+                        "OR h.display_name=? COLLATE NOCASE)",
+                        (snapshot_id, canonical_id, display_name),
+                    ).fetchall()
+                    expansions.append({
+                        "seed": display_name,
+                        "relation": "augment_to_composition",
+                        "candidate_count": len({str(row['comp_id']) for row in rows}),
+                    })
+                    for index, row in enumerate(rows):
+                        add_candidate(row, "augment_association", display_name, {
+                            "source_kind": row["source_kind"],
+                        })
+                        relation_documents.append(_relation_search_document(
+                            snapshot_id, game_patch, source_url, row["comp_id"], row["name"],
+                            "structured_relation", canonical_id or display_name,
+                            f"{row['display_name']} 与 {row['name']} 存在 "
+                            f"{row['source_kind']} association；关联不代表排名",
+                            f"augment:{canonical_id or display_name}:{index}",
+                        ))
+
+            tier_order = {"S": 0, "A": 1, "B": 2, "C": 3}
+            ordered_candidates = sorted(
+                candidate_signals.values(),
+                key=lambda item: (
+                    -int(str(item["trait_coverage_count"])),
+                    tier_order.get(str(item["tier"]), 9),
+                    str(item["name"]),
+                ),
+            )
+            candidates: list[dict[str, object]] = []
+            for seed_name in dict.fromkeys(seed.get("display_name", "") for seed in seeds):
+                candidate = next((item for item in ordered_candidates
+                                  if seed_name and _candidate_has_seed(item, seed_name)), None)
+                if candidate is not None and candidate not in candidates:
+                    candidates.append(candidate)
+            candidates.extend(item for item in ordered_candidates if item not in candidates)
+            candidates = candidates[:candidate_limit]
+            selected_ids = {str(item["comp_id"]) for item in candidates}
+            relation_documents = [item for item in relation_documents
+                                  if str(item["comp_id"]) in selected_ids]
+            for candidate in candidates:
+                comp_id = str(candidate["comp_id"])
+                relation_documents.append(_relation_search_document(
+                    snapshot_id, game_patch, source_url, comp_id, candidate["name"],
+                    "candidate_composition", comp_id,
+                    {
+                        "tier": candidate["tier"],
+                        "candidate_source": candidate["signals"],
+                        "retrieval_order_is_not_strength_ranking": True,
+                    },
+                    f"candidate:{comp_id}",
+                ))
+                sections = connection.execute(
+                    "SELECT section_type,ordinal,text,source_response_id "
+                    "FROM datatft_comp_strategy_sections WHERE snapshot_id=? AND comp_id=? "
+                    "AND section_type IN ('starting_conditions','core','early_game',"
+                    "'mid_game','late_game') ORDER BY CASE section_type "
+                    "WHEN 'starting_conditions' THEN 0 WHEN 'core' THEN 1 "
+                    "WHEN 'early_game' THEN 2 WHEN 'mid_game' THEN 3 ELSE 4 END, ordinal",
+                    (snapshot_id, comp_id),
+                ).fetchall()
+                for row in sections:
+                    relation_documents.append(_relation_search_document(
+                        snapshot_id, game_patch, source_url, comp_id, candidate["name"],
+                        str(row["section_type"]), comp_id, str(row["text"]),
+                        f"strategy:{comp_id}:{row['section_type']}:{row['ordinal']}",
+                        source_response_id=row["source_response_id"],
+                    ))
+        return {
+            "evidence": relation_documents,
+            "expansions": expansions,
+            "candidate_comps": candidates,
+        }
 
     def _search_knowledge_rows(
         self,

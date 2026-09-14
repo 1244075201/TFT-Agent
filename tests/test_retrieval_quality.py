@@ -117,7 +117,7 @@ async def test_five_retrieval_acceptance_cases(
     assert third.understanding.target_comp is None
     assert third.retrieval_plan.retrieve_all_comps is False
     broad_call = next(call for call in third.repository_calls
-                      if call.operation == "search_normalized_knowledge")
+                      if call.operation == "hybrid_normalized_retrieval")
     assert broad_call.result_count > 0
     assert not any(call.operation == "browse_comps" for call in third.repository_calls)
     assert third.llm_call_count == 1
@@ -281,7 +281,8 @@ async def test_state_aware_retrieval_regression_cases(
     assert second.game_state_after_merge.comp_name == "6护卫蛇女"
     assert second.game_state_after_merge.emblems == ["迅捷射手纹章"]
     assert second.understanding.state_mutation.value == "replace"
-    assert _composition_names(second) == {"6护卫蛇女"}
+    assert "6护卫蛇女" in _composition_names(second)
+    assert second.structured_candidate_comps
     assert "6护卫蛇女" in second.clean_context_summary
     assert "黑荆棘裁决" not in second.clean_context_summary
 
@@ -296,7 +297,7 @@ async def test_state_aware_retrieval_regression_cases(
     ]
     assert third.understanding.target_comp is None
     assert third.game_state_after_merge.comp_name is None
-    assert any(call.operation == "search_normalized_knowledge"
+    assert any(call.operation == "hybrid_normalized_retrieval"
                for call in third.repository_calls)
     assert {"艾希95", "德莱文95"} <= _composition_names(third)
 
