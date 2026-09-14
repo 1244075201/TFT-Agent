@@ -100,7 +100,8 @@ async def test_five_retrieval_acceptance_cases(
     assert ("emblem", "迅捷射手纹章") in resolved
     assert second.retrieval_plan.retrieve_all_comps is False
     assert not any(call.operation == "browse_comps" for call in second.repository_calls)
-    assert any("missing" in gap for gap in second.knowledge_gaps)
+    assert second.retrieval_first_strategy is True
+    assert second.retrieved_knowledge.evidence
     assert second.llm_call_count == 1
 
     augment_names = await _three_unambiguous_augments(retrieval_settings)
@@ -115,15 +116,11 @@ async def test_five_retrieval_acceptance_cases(
     assert {item.display_name for item in resolved_augments} == set(augment_names)
     assert third.understanding.target_comp is None
     assert third.retrieval_plan.retrieve_all_comps is False
-    static_call = next(call for call in third.repository_calls
-                       if call.operation == "find_static_entities_by_ids")
-    assert set(static_call.filters["canonical_ids"]) == {
-        item.canonical_id for item in resolved_augments
-    }
-    assert static_call.result_count == 3
+    broad_call = next(call for call in third.repository_calls
+                      if call.operation == "search_normalized_knowledge")
+    assert broad_call.result_count > 0
     assert not any(call.operation == "browse_comps" for call in third.repository_calls)
     assert third.llm_call_count == 1
-    assert any("comparison evidence unavailable" in gap for gap in third.knowledge_gaps)
 
     events = await _ask(service, "德莱文95核心棋子是谁？", "case-four")
     fourth = _trace(service)
@@ -148,7 +145,7 @@ async def test_five_retrieval_acceptance_cases(
     assert fifth.understanding.target_comp is None
     assert fifth.retrieval_plan.retrieve_all_comps is False
     assert not any(call.operation == "browse_comps" for call in fifth.repository_calls)
-    assert any("candidate index" in gap for gap in fifth.knowledge_gaps)
+    assert fifth.retrieved_knowledge.evidence
     assert fifth.llm_call_count == 1
     assert _FakeDecisionClient.calls == 4
 
@@ -285,7 +282,7 @@ async def test_state_aware_retrieval_regression_cases(
     assert second.game_state_after_merge.emblems == ["迅捷射手纹章"]
     assert second.understanding.state_mutation.value == "replace"
     assert _composition_names(second) == {"6护卫蛇女"}
-    assert "高迅射厄斐" not in second.clean_context_summary
+    assert "6护卫蛇女" in second.clean_context_summary
     assert "黑荆棘裁决" not in second.clean_context_summary
 
     await _ask(
@@ -299,10 +296,9 @@ async def test_state_aware_retrieval_regression_cases(
     ]
     assert third.understanding.target_comp is None
     assert third.game_state_after_merge.comp_name is None
-    comp_calls = [call for call in third.repository_calls
-                  if call.operation == "find_comp_by_id"]
-    assert [call.filters["canonical_id"] for call in comp_calls] == ["16244", "16241"]
-    assert _composition_names(third) == {"艾希95", "德莱文95"}
+    assert any(call.operation == "search_normalized_knowledge"
+               for call in third.repository_calls)
+    assert {"艾希95", "德莱文95"} <= _composition_names(third)
 
     await _ask(
         service,
@@ -329,8 +325,11 @@ async def test_state_aware_retrieval_regression_cases(
              if item.section == "early_game"]
     assert early and all("连败" in value for value in early)
     assert all("保血" not in value for value in early)
-    assert "RETRIEVED STRATEGY CONDITIONS" in fifth.clean_context_summary
-    facts_block = fifth.clean_context_summary.split("USER FACTS\n", 1)[1].split("\n\n", 1)[0]
+    assert "RETRIEVED EVIDENCE" in fifth.clean_context_summary
+    assert "KNOWN GAPS" in fifth.clean_context_summary
+    facts_block = fifth.clean_context_summary.split(
+        "CURRENT GAMESTATE\n", 1
+    )[1].split("\n\n", 1)[0]
     assert "体系卡数量多" not in facts_block
 
     await _ask(service, "我玩艾希95", "state-case-six")
@@ -363,8 +362,8 @@ async def test_state_aware_retrieval_regression_cases(
     assert retained.understanding.state_mutation.value == "retain"
     assert retained.understanding.target_comp is not None
     assert retained.understanding.target_comp.display_name == "艾希95"
-    assert retained.injected_history
-    assert "RECENT CONVERSATION" in retained.clean_context_summary
+    assert retained.injected_history == []
+    assert "艾希95" in retained.retrieval_queries
     assert retained.game_state_after_merge.comp_name == "艾希95"
     assert _FakeDecisionClient.calls == 10
 
@@ -389,7 +388,7 @@ async def test_general_guide_conversational_subject_precedence(
     assert inherited.conversational_subject.display_name == "德莱文95"
     assert inherited.understanding.target_comp is not None
     assert inherited.understanding.target_comp.display_name == "德莱文95"
-    assert _composition_names(inherited) == {"德莱文95"}
+    assert "德莱文95" in _composition_names(inherited)
 
     await _ask_general(service, "德莱文95怎么玩", "guide-followup-equipment")
     await _ask_general(service, "那要什么装备？", "guide-followup-equipment")
@@ -440,7 +439,9 @@ async def test_explicit_unresolved_entity_blocks_subject_inheritance(
     assert trace.subject_inherited is False
     assert trace.inheritance_blocked_reason == "explicit_unresolved_entity_attempt"
     assert trace.conversational_subject is None
-    assert trace.final_resolution_category.value == "unresolved_entity"
+    assert trace.final_resolution_category.value == "resolved_strategy"
+    assert trace.retrieval_first_strategy is True
+    assert trace.llm_call_count == 1
     answer = next(event.message for event in events if event.type == "answer")
     assert all(value not in answer for value in forbidden)
 
@@ -501,6 +502,7 @@ async def test_new_general_guide_conversation_clears_only_guide_scope(
 ) -> None:
     monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
     service = AgentService(retrieval_settings)
+    await service._repo().clear_session("desktop-match")
     match_state = GameState(comp_name="森林天使", stage="4-1", hp=40)
     await service.save_game_state("desktop-match", match_state)
     await service._repo().append_session_messages(

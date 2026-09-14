@@ -34,6 +34,7 @@ from tft_agent.app.pipeline import (
     explicit_entity_attempt,
     format_item_plans,
     is_global_browse_query,
+    is_strategy_open_query,
     is_topic_compatible_query,
     static_evidence,
     understand_query,
@@ -189,11 +190,15 @@ class AgentService:
             yield ChatEvent(type="error", message="实验实时模式默认关闭。")
             return
         product_mode = ProductMode(request.product_mode)
+        retrieval_first = is_strategy_open_query(request.text, product_mode)
         scope = session_scope(request.session_id, product_mode)
         conversation_reset = scope.session_id in self._general_guide_resets
         self._cancelled_sessions.discard(scope.session_id)
         started = perf_counter()
-        yield ChatEvent(type="status", message="正在解析实体并规划检索…")
+        yield ChatEvent(
+            type="status",
+            message=("正在检索当前版本策略…" if retrieval_first else "正在解析实体并规划检索…"),
+        )
         persisted_state = (
             await self.load_game_state(scope.session_id) if scope.uses_game_state else GameState()
         )
@@ -297,6 +302,12 @@ class AgentService:
                 resolution.entities, active_context
             )
             understanding = _apply_champion_strategy_route(understanding, champion_matches)
+            if retrieval_first:
+                understanding = understanding.model_copy(update={
+                    "kind": QueryKind.STRATEGY_DECISION,
+                    "unresolved_terms": [],
+                    "resolution_category": ResolutionCategory.RESOLVED_STRATEGY,
+                })
             if (
                 understanding.state_mutation == StateMutationIntent.RETAIN
                 and state.comp_name
@@ -316,15 +327,25 @@ class AgentService:
                 active_context.active_snapshot_id,
             )
             plan_end = perf_counter()
-            knowledge, calls = await self._retrieve(request.text, plan)
+            retrieval_queries: list[str] = []
+            if retrieval_first:
+                retrieval_queries = _broad_retrieval_queries(
+                    request.text, state if scope.uses_game_state else None, resolution.entities
+                )
+                knowledge, calls = await self._retrieve_broad_strategy(
+                    retrieval_queries, plan
+                )
+            else:
+                knowledge, calls = await self._retrieve(request.text, plan)
             calls = [*champion_calls, *calls]
             retrieval_end = perf_counter()
-            history = _relevant_history(history_rows, understanding)
+            history = [] if retrieval_first else _relevant_history(history_rows, understanding)
             gaps = context_gaps(state) if scope.uses_game_state else []
             context = AnswerContext(
                 question=request.text, understanding=understanding, game_state=state,
                 history=history, retrieval_plan=plan, evidence=knowledge.evidence,
                 context_gaps=gaps, knowledge_gaps=knowledge.knowledge_gaps,
+                retrieval_first=retrieval_first,
             )
             context_summary = context.readable_summary()
             context_end = perf_counter()
@@ -345,6 +366,13 @@ class AgentService:
                 explicit_unresolved_term=unresolved_attempt,
                 inheritance_blocked_reason=inheritance_blocked_reason,
                 conversation_reset=conversation_reset,
+                retrieval_first_strategy=retrieval_first,
+                workspace=product_mode,
+                game_state_present=(scope.uses_game_state and _has_game_state(state)),
+                retrieval_queries=retrieval_queries,
+                retrieved_evidence_kinds=list(dict.fromkeys(
+                    item.section for item in knowledge.evidence
+                )),
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -360,7 +388,7 @@ class AgentService:
             payload = trace.model_dump(mode="json")
             yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
                             context_gaps=[*gaps, *knowledge.knowledge_gaps])
-            if (
+            if not retrieval_first and (
                 understanding.kind == QueryKind.DETERMINISTIC_LOOKUP
                 or understanding.resolution_category
                 == ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE
@@ -396,6 +424,39 @@ class AgentService:
         finally:
             if vision is not None:
                 await vision.close()
+
+    async def _retrieve_broad_strategy(
+        self,
+        queries: list[str],
+        plan: RetrievalPlan,
+    ) -> tuple[RetrievedKnowledge, list[RepositoryCall]]:
+        started = perf_counter()
+        rows = await self._repo().search_normalized_knowledge(
+            plan.active_snapshot_id, plan.game_patch, queries, limit=12
+        )
+        call = RepositoryCall(
+            operation="search_normalized_knowledge",
+            filters={
+                "queries": queries,
+                "game_patch": plan.game_patch,
+                "snapshot_id": plan.active_snapshot_id,
+                "limit": 12,
+            },
+            result_count=len(rows),
+            latency_ms=(perf_counter() - started) * 1000,
+        )
+        evidence = [EvidenceRecord(
+            requested_patch=plan.game_patch,
+            **row,
+        ) for row in rows]
+        gaps = [] if evidence else [
+            "no relevant evidence found in active normalized knowledge"
+        ]
+        if evidence and all(item.section == "definition" for item in evidence):
+            gaps.append(
+                "retrieval found entity definitions but no composition strategy relation"
+            )
+        return RetrievedKnowledge(evidence=evidence, knowledge_gaps=gaps), [call]
 
     async def _conversation_subject(
         self, rows: list[tuple[str, str]], context: ActivePatchContext
@@ -726,6 +787,35 @@ def _merge_game_state(previous: GameState, current: GameState) -> GameState:
               if field != "user_question"}
     update["user_question"] = current.user_question
     return previous.model_copy(update=update)
+
+
+def _has_game_state(state: GameState) -> bool:
+    return bool(state.model_dump(
+        exclude={"user_question"}, exclude_none=True, exclude_defaults=True
+    ))
+
+
+def _broad_retrieval_queries(
+    raw_query: str,
+    state: GameState | None,
+    entities: list[ResolvedEntity],
+) -> list[str]:
+    """Preserve the raw query and add only existing deterministic recall hints."""
+    queries = [raw_query]
+    for entity in entities:
+        queries.extend((entity.matched_alias, entity.display_name))
+        if entity.entity_type == "emblem" and entity.display_name.endswith("纹章"):
+            queries.append(entity.display_name.removesuffix("纹章"))
+    if state is not None:
+        queries.extend(value for value in (
+            state.comp_name, state.target_champion, *state.core_units,
+            *state.items, *state.item_components, *state.completed_items,
+            *state.artifacts, *state.radiant_items, *state.emblems,
+            *state.augments, *state.augment_choices,
+        ) if value)
+        queries.extend(unit.name for unit in [*state.board, *state.bench] if unit.name)
+        queries.extend(trait.name for trait in state.traits)
+    return list(dict.fromkeys(value.strip() for value in queries if value.strip()))
 
 
 def _apply_champion_strategy_route(

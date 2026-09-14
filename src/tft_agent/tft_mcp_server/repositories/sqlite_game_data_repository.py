@@ -23,6 +23,72 @@ from tft_agent.tft_mcp_server.schemas import (
     TraitInfo,
 )
 
+_OPEN_QUERY_STOP_WORDS = {
+    "我", "现在", "当前", "该", "怎么", "怎么玩", "怎么办", "干嘛", "下一步",
+    "干什么", "做什么", "这把", "这局", "运营", "处理", "一下", "请问",
+}
+
+
+def _search_normalize(value: object) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value).casefold())
+
+
+def _normalized_search_terms(queries: list[str]) -> list[str]:
+    terms: list[str] = []
+    for query in queries:
+        normalized = _search_normalize(query)
+        if normalized and normalized not in _OPEN_QUERY_STOP_WORDS:
+            terms.append(normalized)
+        for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", query):
+            token = _search_normalize(token)
+            for stop_word in sorted(_OPEN_QUERY_STOP_WORDS, key=len, reverse=True):
+                token = token.replace(stop_word, "")
+            if len(token) >= 2:
+                terms.append(token)
+    return list(dict.fromkeys(terms))
+
+
+def _json_text_values(value: object) -> list[str]:
+    try:
+        decoded = json.loads(str(value))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(decoded, list):
+        return [str(item) for item in decoded if str(item).strip()]
+    if isinstance(decoded, dict):
+        return [str(item) for item in decoded.values() if str(item).strip()]
+    return [str(decoded)] if str(decoded).strip() else []
+
+
+def _normalized_search_document(
+    entity_type: object,
+    canonical_id: object,
+    display_name: object,
+    section: object,
+    semantic_content: str,
+    comp_id: object,
+    source_response_id: object,
+    *,
+    suffix: str = "",
+    source_url: object = None,
+) -> dict[str, object]:
+    identity = ":".join(filter(None, (
+        str(entity_type), str(canonical_id), str(section), str(comp_id or ""), suffix,
+    )))
+    return {
+        "evidence_id": "normalized-search:" + identity,
+        "entity_type": str(entity_type),
+        "canonical_entity_id": str(canonical_id),
+        "display_name": str(display_name),
+        "section": str(section),
+        "semantic_content": semantic_content,
+        "comp_id": str(comp_id) if comp_id is not None else None,
+        "source_response_id": (
+            str(source_response_id) if source_response_id is not None else None
+        ),
+        "source_url": str(source_url) if source_url else None,
+    }
+
 
 class SQLiteGameDataRepository:
     """Persist and query normalized records without exposing SQL to callers."""
@@ -339,6 +405,22 @@ class SQLiteGameDataRepository:
             game_patch,
             limit,
             strategy_comp_name,
+        )
+
+    async def search_normalized_knowledge(
+        self,
+        snapshot_id: str,
+        game_patch: str,
+        queries: Sequence[str],
+        limit: int = 12,
+    ) -> list[dict[str, object]]:
+        """Search active normalized knowledge without requiring canonical routing."""
+        return await asyncio.to_thread(
+            self._search_normalized_knowledge_sync,
+            snapshot_id,
+            game_patch,
+            list(queries),
+            limit,
         )
 
     async def rebuild_canonical_catalog(
@@ -1495,6 +1577,211 @@ class SQLiteGameDataRepository:
                 query, tokens, None, limit, strategy_comp_name, "unversioned"
             )
         return rows
+
+    def _search_normalized_knowledge_sync(
+        self,
+        snapshot_id: str,
+        game_patch: str,
+        queries: list[str],
+        limit: int,
+    ) -> list[dict[str, object]]:
+        """Rank presentation-safe evidence from the active normalized snapshot."""
+        cleaned_queries = list(dict.fromkeys(value.strip() for value in queries if value.strip()))
+        if not cleaned_queries:
+            return []
+        with self._connect() as connection:
+            snapshot = connection.execute(
+                "SELECT source, source_url FROM datatft_snapshots "
+                "WHERE snapshot_id=? AND game_patch=?",
+                (snapshot_id, game_patch),
+            ).fetchone()
+            if snapshot is None:
+                return []
+            documents: list[dict[str, object]] = []
+
+            comps = connection.execute(
+                "SELECT comp_id, name, tier, core_units, level_plan, source_response_id "
+                "FROM datatft_comps WHERE snapshot_id=?",
+                (snapshot_id,),
+            ).fetchall()
+            comp_names = {str(row["comp_id"]): str(row["name"]) for row in comps}
+            for row in comps:
+                core_units = _json_text_values(row["core_units"])
+                level_plan = _json_text_values(row["level_plan"])
+                text = "；".join(filter(None, (
+                    f"阵容：{row['name']}",
+                    f"评级：{row['tier']}" if row["tier"] else "",
+                    "核心棋子：" + "、".join(core_units) if core_units else "",
+                    "等级规划：" + "；".join(level_plan) if level_plan else "",
+                )))
+                documents.append(_normalized_search_document(
+                    "composition", row["comp_id"], row["name"], "composition",
+                    text, row["comp_id"], row["source_response_id"],
+                ))
+
+            board_rows = connection.execute(
+                "SELECT b.comp_id, b.display_name, b.canonical_champion_id, b.x, b.y, "
+                "b.stars, b.source_response_id, s.traits FROM datatft_comp_board_units b "
+                "LEFT JOIN static_entities s ON s.entity_id=b.canonical_champion_id "
+                "AND s.retrieved_at=(SELECT MAX(s2.retrieved_at) FROM static_entities s2 "
+                "WHERE s2.entity_id=b.canonical_champion_id) "
+                "WHERE b.snapshot_id=? AND b.board_phase='FINAL' "
+                "ORDER BY b.comp_id, b.board_index",
+                (snapshot_id,),
+            ).fetchall()
+            for row in board_rows:
+                name = str(row["display_name"] or "未解析棋子")
+                traits = _json_text_values(row["traits"])
+                position = (
+                    f"，站位({row['x']},{row['y']})"
+                    if row["x"] is not None and row["y"] is not None else ""
+                )
+                documents.append(_normalized_search_document(
+                    "champion", row["canonical_champion_id"] or name,
+                    name, "composition_roster",
+                    f"{comp_names.get(str(row['comp_id']), '阵容')}：{name}{position}"
+                    + ("，羁绊：" + "、".join(traits) if traits else ""),
+                    row["comp_id"], row["source_response_id"],
+                ))
+
+            item_rows = connection.execute(
+                "SELECT p.comp_id, p.holder_display_name, p.holder_canonical_champion_id, "
+                "p.item_display_name, p.canonical_item_id, p.plan_index, p.slot_index, "
+                "p.source_response_id, i.item_category, i.runtime_description "
+                "FROM datatft_comp_item_plan_items p LEFT JOIN datatft_item_identities i "
+                "ON i.snapshot_id=p.snapshot_id AND i.canonical_item_id=p.canonical_item_id "
+                "WHERE p.snapshot_id=?",
+                (snapshot_id,),
+            ).fetchall()
+            for row in item_rows:
+                item_name = str(row["item_display_name"] or "未解析装备")
+                holder = str(row["holder_display_name"] or "未解析棋子")
+                category = str(row["item_category"] or "item").casefold()
+                section = category if category in {"artifact", "radiant", "emblem"} else "item_plan"
+                description = str(row["runtime_description"] or "").strip()
+                documents.append(_normalized_search_document(
+                    section, row["canonical_item_id"] or item_name, item_name, section,
+                    f"{comp_names.get(str(row['comp_id']), '阵容')}：{holder}的第"
+                    f"{int(row['plan_index']) + 1}套装备第{int(row['slot_index']) + 1}件是"
+                    f"{item_name}" + (f"；效果：{description}" if description else ""),
+                    row["comp_id"], row["source_response_id"],
+                ))
+
+            augment_rows = connection.execute(
+                "SELECT h.comp_id, h.display_name, h.canonical_augment_id, h.source_kind, "
+                "h.source_response_id, i.runtime_description "
+                "FROM datatft_comp_hexes h LEFT JOIN datatft_augment_identities i "
+                "ON i.snapshot_id=h.snapshot_id AND i.canonical_augment_id=h.canonical_augment_id "
+                "WHERE h.snapshot_id=?",
+                (snapshot_id,),
+            ).fetchall()
+            for row in augment_rows:
+                name = str(row["display_name"] or "未解析强化")
+                description = str(row["runtime_description"] or "").strip()
+                documents.append(_normalized_search_document(
+                    "augment", row["canonical_augment_id"] or name, name, "augment",
+                    f"{comp_names.get(str(row['comp_id']), '阵容')}关联强化：{name}"
+                    + (f"；效果：{description}" if description else ""),
+                    row["comp_id"], row["source_response_id"],
+                ))
+
+            for row in connection.execute(
+                "SELECT comp_id, condition_kind, display_name, level_value, trait_level_text, "
+                "carry_hero_value, source_response_id FROM datatft_comp_conditions "
+                "WHERE snapshot_id=?",
+                (snapshot_id,),
+            ).fetchall():
+                values = [str(row[key]) for key in (
+                    "display_name", "level_value", "trait_level_text", "carry_hero_value"
+                ) if row[key] not in (None, "")]
+                documents.append(_normalized_search_document(
+                    "condition", f"{row['comp_id']}:{row['condition_kind']}",
+                    comp_names.get(str(row["comp_id"]), "阵容"), "condition",
+                    f"{comp_names.get(str(row['comp_id']), '阵容')}条件："
+                    + "、".join(values or [str(row["condition_kind"])]),
+                    row["comp_id"], row["source_response_id"],
+                ))
+
+            for row in connection.execute(
+                "SELECT comp_id, section_type, ordinal, text, source_response_id "
+                "FROM datatft_comp_strategy_sections WHERE snapshot_id=?",
+                (snapshot_id,),
+            ).fetchall():
+                comp_name = comp_names.get(str(row["comp_id"]), "阵容")
+                documents.append(_normalized_search_document(
+                    "composition", row["comp_id"], comp_name, row["section_type"],
+                    f"{comp_name}：{row['text']}", row["comp_id"], row["source_response_id"],
+                    suffix=str(row["ordinal"]),
+                ))
+
+            for row in connection.execute(
+                "SELECT c.canonical_id, c.entity_type, c.display_name, s.description, "
+                "s.source_url FROM canonical_entities c LEFT JOIN static_entities s "
+                "ON s.entity_id=c.canonical_id AND s.retrieved_at=("
+                "SELECT MAX(s2.retrieved_at) FROM static_entities s2 "
+                "WHERE s2.entity_id=c.canonical_id) "
+                "WHERE c.game_patch=?",
+                (game_patch,),
+            ).fetchall():
+                documents.append(_normalized_search_document(
+                    row["entity_type"], row["canonical_id"], row["display_name"],
+                    "definition",
+                    f"{row['display_name']}：{row['description'] or '当前无详细定义'}",
+                    None, None, source_url=row["source_url"],
+                ))
+
+        query_terms = _normalized_search_terms(cleaned_queries)
+        ranked: list[dict[str, object]] = []
+        for document in documents:
+            haystack = _search_normalize(
+                f"{document['display_name']} {document['semantic_content']}"
+            )
+            title = _search_normalize(str(document["display_name"]))
+            matches = [term for term in query_terms if term and term in haystack]
+            if not matches:
+                continue
+            title_hits = sum(term in title for term in matches)
+            score = min(1.0, 0.25 + (0.5 * title_hits) + (0.25 * len(matches)))
+            document.update({
+                "source": (
+                    "DataTFT normalized"
+                    if document.get("comp_id") else "current static knowledge"
+                ),
+                "source_patch": game_patch,
+                "patch_match": "exact",
+                "url": document.pop("source_url", None) or str(snapshot["source_url"]),
+                "snapshot_id": snapshot_id if document.get("comp_id") else None,
+                "relevance_score": round(score, 4),
+                "resolution_status": "RESOLVED",
+            })
+            ranked.append(document)
+        ranked.sort(key=lambda item: (
+            float(str(item["relevance_score"])),
+            item["section"] in {"core", "tip", "composition"},
+        ), reverse=True)
+        if not ranked:
+            fallbacks = [doc for doc in documents if doc["section"] == "composition"][:limit]
+            for document in fallbacks:
+                document.pop("source_url", None)
+                document.update({
+                    "source": "DataTFT normalized", "source_patch": game_patch,
+                    "patch_match": "exact", "url": str(snapshot["source_url"]),
+                    "snapshot_id": snapshot_id, "relevance_score": 0.1,
+                    "resolution_status": "RESOLVED",
+                })
+            ranked = fallbacks
+        selected: list[dict[str, object]] = []
+        group_counts: dict[tuple[str, str], int] = {}
+        for document in ranked:
+            group = (str(document["section"]), str(document["display_name"]))
+            maximum = 1 if document["section"] == "definition" else 2
+            if group_counts.get(group, 0) >= maximum:
+                continue
+            group_counts[group] = group_counts.get(group, 0) + 1
+            selected.append(document)
+            if len(selected) >= limit:
+                break
+        return selected
 
     def _search_knowledge_rows(
         self,

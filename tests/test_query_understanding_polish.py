@@ -77,11 +77,10 @@ async def test_inferno_emblem_and_ashe_are_resolved_as_separate_entities(
     assert ("emblem", "地狱火纹章") in resolved
     assert trace.understanding.unresolved_terms == []
     assert trace.explicit_unresolved_term is None
-    assert any("recognized entities lack exact relation" in gap for gap in trace.knowledge_gaps)
+    assert trace.retrieval_first_strategy is True
     answer = next(event.message for event in events if event.type == "answer")
-    assert "已识别到实体" in answer and "证据没有建立" in answer
-    assert "三条候选路线" not in answer
-    assert trace.llm_call_count == 0
+    assert answer == "仅按当前证据给出回答。"
+    assert trace.llm_call_count == 1
 
 
 @pytest.mark.asyncio

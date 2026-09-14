@@ -158,6 +158,11 @@ class RetrievalTrace(StrictModel):
     explicit_unresolved_term: str | None = None
     inheritance_blocked_reason: str | None = None
     conversation_reset: bool = False
+    retrieval_first_strategy: bool = False
+    workspace: ProductMode | None = None
+    game_state_present: bool = False
+    retrieval_queries: list[str] = Field(default_factory=list)
+    retrieved_evidence_kinds: list[str] = Field(default_factory=list)
 
 
 class AnswerContext(StrictModel):
@@ -169,9 +174,34 @@ class AnswerContext(StrictModel):
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     context_gaps: list[str] = Field(default_factory=list)
     knowledge_gaps: list[str] = Field(default_factory=list)
+    retrieval_first: bool = False
 
     def readable_summary(self) -> str:
         facts = _user_facts(self.game_state)
+        if self.retrieval_first:
+            blocks = [
+                "USER QUESTION\n" + self.question.strip(),
+                "CURRENT PATCH\n" + self.retrieval_plan.game_patch,
+            ]
+            if self.understanding.product_mode == ProductMode.MATCH_GUIDANCE:
+                blocks.append(
+                    "CURRENT GAMESTATE\n"
+                    + ("\n".join(f"- {key}: {value}" for key, value in facts.items())
+                       if facts else "- No structured facts provided")
+                )
+            blocks.append(
+                "RETRIEVED EVIDENCE\n"
+                + (_grouped_evidence(self.evidence, [])
+                   if self.evidence else "- No relevant current-patch evidence found")
+            )
+            blocks.append(
+                "KNOWN GAPS\n"
+                + ("\n".join(f"- {gap}" for gap in [
+                    *self.context_gaps, *self.knowledge_gaps,
+                ]) if self.context_gaps or self.knowledge_gaps
+                   else "- No material retrieval gap recorded")
+            )
+            return "\n\n".join(blocks)
         conditions = [item for item in self.evidence if item.section == "starting_conditions"]
         recommendations = [item for item in self.evidence
                            if item.section != "starting_conditions"]
@@ -238,6 +268,20 @@ _FACT_TERMS = (
     "怎么站", "站哪里", "站位", "有哪些神器", "有什么神器", "光明装备", "有什么转职",
     "有哪些强化", "有什么强化", "有什么海克斯", "定义", "效果是什么", "干什么的",
 )
+
+
+def is_strategy_open_query(text: str, mode: ProductMode) -> bool:
+    """Route open strategy language without requiring an entity parse."""
+    lowered = text.casefold()
+    if mode == ProductMode.COMP_BROWSER:
+        return False
+    if any(term in lowered for term in _FACT_TERMS):
+        return False
+    return any(term in lowered for term in (
+        *_DECISION_TERMS,
+        "现在怎么玩", "下一步干什么", "下一步做什么", "我现在该干嘛",
+        "这把怎么", "这局怎么", "该怎么玩", "干嘛",
+    ))
 
 
 def understand_query(
