@@ -110,6 +110,7 @@ class AliasRegistry:
                     entity_type=entry.entity_type,
                     alias_kind=f"registry_{entry.scope}",
                 ))
+        output.extend(self._materialize_emblem_expressions(entities, output))
         by_alias: dict[str, set[tuple[str, str]]] = {}
         for item in output:
             by_alias.setdefault(EntityTextNormalizer.normalize(item.alias), set()).add(
@@ -117,16 +118,65 @@ class AliasRegistry:
             )
         conflicts = {key for key, values in by_alias.items() if len(values) > 1}
         accepted: list[MaterializedAlias] = []
+        seen: set[tuple[str, str, str]] = set()
         for item in output:
             if EntityTextNormalizer.normalize(item.alias) in conflicts:
                 rejected.append(AliasRejection(
                     alias=item.alias, canonical_name="", reason="alias_conflict"
                 ))
-            else:
+            elif (
+                EntityTextNormalizer.normalize(item.alias),
+                item.canonical_id,
+                item.entity_type,
+            ) not in seen:
                 accepted.append(item)
+                seen.add((
+                    EntityTextNormalizer.normalize(item.alias),
+                    item.canonical_id,
+                    item.entity_type,
+                ))
         self.last_rejections = rejected
         self._materialized = accepted
         return accepted
+
+    @staticmethod
+    def _materialize_emblem_expressions(
+        entities: list[tuple[str, str, str, str]],
+        reviewed: list[MaterializedAlias],
+    ) -> list[MaterializedAlias]:
+        """Derive product phrases only for a unique, real trait-to-emblem relation."""
+        emblems_by_name: dict[str, list[str]] = {}
+        traits: dict[str, str] = {}
+        for identifier, kind, name, _ in entities:
+            if kind == "emblem":
+                emblems_by_name.setdefault(name, []).append(identifier)
+            elif kind == "trait":
+                traits[identifier] = name
+
+        stems_by_trait: dict[str, set[str]] = {}
+        for item in reviewed:
+            if item.entity_type == "trait" and item.canonical_id in traits:
+                stems_by_trait.setdefault(item.canonical_id, set()).add(item.alias)
+
+        generated: list[MaterializedAlias] = []
+        for trait_id, trait_name in traits.items():
+            emblem_ids = emblems_by_name.get(trait_name + "纹章", [])
+            if len(emblem_ids) != 1:
+                continue
+            emblem_id = emblem_ids[0]
+            aliases = {trait_name + "转", trait_name + "转职"}
+            for stem in stems_by_trait.get(trait_id, set()):
+                aliases.update({stem + "转", stem + "纹章", stem + "转职"})
+            generated.extend(
+                MaterializedAlias(
+                    alias=alias,
+                    canonical_id=emblem_id,
+                    entity_type="emblem",
+                    alias_kind="derived_emblem",
+                )
+                for alias in sorted(aliases)
+            )
+        return generated
 
     def rejections(self) -> list[AliasRejection]:
         return list(self.last_rejections)

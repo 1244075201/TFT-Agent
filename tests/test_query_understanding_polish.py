@@ -9,10 +9,16 @@ from typing import Any
 import pytest
 
 import tft_agent.app.service as service_module
-from tft_agent.app.pipeline import AnswerContext, ProductMode, RetrievalTrace
+from tft_agent.app.pipeline import (
+    AnswerContext,
+    ProductMode,
+    RetrievalTrace,
+    build_retrieval_plan,
+    understand_query,
+)
 from tft_agent.app.service import AgentService
 from tft_agent.core.config import Settings
-from tft_agent.core.schemas import ChatEvent, ChatRequest, FinalResponse
+from tft_agent.core.schemas import ChatEvent, ChatRequest, FinalResponse, GameState
 from tft_agent.llm.grounded_decision import DecisionOutcome, GroundedDecisionClient
 
 
@@ -84,10 +90,19 @@ async def test_inferno_emblem_and_ashe_are_resolved_as_separate_entities(
     [
         ("地狱火艾希怎么玩", "trait", "地狱火", "艾希"),
         ("地狱火转艾希怎么玩", "emblem", "地狱火纹章", "艾希"),
+        ("花妖艾希怎么玩", "trait", "绝命花妖", "艾希"),
+        ("花妖转艾希怎么玩", "emblem", "绝命花妖纹章", "艾希"),
+        ("森林艾希怎么玩", "trait", "永恒之森", "艾希"),
+        ("森林转艾希怎么玩", "emblem", "永恒之森纹章", "艾希"),
+        ("永森艾希怎么玩", "trait", "永恒之森", "艾希"),
         ("神谕阿狸怎么玩", "trait", "神谕", "阿狸"),
         ("神谕转阿狸怎么玩", "emblem", "神谕纹章", "阿狸"),
         ("重装雷恩加尔怎么玩", "trait", "重装战士", "雷恩加尔"),
         ("重装转雷恩加尔怎么玩", "emblem", "重装战士纹章", "雷恩加尔"),
+        ("裁决德莱文怎么玩", "trait", "裁决使", "德莱文"),
+        ("裁决转德莱文怎么玩", "emblem", "裁决使纹章", "德莱文"),
+        ("迅射厄斐琉斯怎么玩", "trait", "迅捷射手", "厄斐琉斯"),
+        ("迅射转厄斐琉斯怎么玩", "emblem", "迅捷射手纹章", "厄斐琉斯"),
     ],
 )
 async def test_trait_and_emblem_phrases_remain_distinct(
@@ -239,11 +254,11 @@ async def test_decision_prompt_closes_knowledge_gap_fact_boundary(
     client = GroundedDecisionClient(polish_settings, client=provider)  # type: ignore[arg-type]
     service = AgentService(polish_settings)
     await service._context()
-    state = service_module.GameState(user_question="地狱火转现在怎么玩好")
-    understanding = service_module.understand_query(
+    state = GameState(user_question="地狱火转现在怎么玩好")
+    understanding = understand_query(
         state.user_question or "", state, ProductMode.GENERAL_GUIDE
     )
-    plan = service_module.build_retrieval_plan(
+    plan = build_retrieval_plan(
         understanding, state, "18.2", 18, "Enchanted Wilds", "snapshot"
     )
     context = AnswerContext(
@@ -274,11 +289,11 @@ async def test_general_guide_context_does_not_frame_empty_match_state_as_a_gap(
 
 
 def test_match_guidance_context_keeps_empty_state_visibility() -> None:
-    state = service_module.GameState(user_question="这局怎么玩")
-    understanding = service_module.understand_query(
+    state = GameState(user_question="这局怎么玩")
+    understanding = understand_query(
         "这局怎么玩", state, ProductMode.MATCH_GUIDANCE
     )
-    plan = service_module.build_retrieval_plan(
+    plan = build_retrieval_plan(
         understanding, state, "18.2", 18, "Enchanted Wilds", "snapshot"
     )
     summary = AnswerContext(

@@ -1,5 +1,12 @@
 {
   "aliases": [
-    {"aliases":["重装"],"entity_type":"trait","canonical_name":"重装战士","canonical_id":"DA_18_Vanguard","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"}
+    {"aliases":["重装"],"entity_type":"trait","canonical_name":"重装战士","canonical_id":"DA_18_Vanguard","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["花妖"],"entity_type":"trait","canonical_name":"绝命花妖","canonical_id":"DA_FloraFatalis18","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["森林","永森"],"entity_type":"trait","canonical_name":"永恒之森","canonical_id":"DA_18_Elderwood","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["迅射"],"entity_type":"trait","canonical_name":"迅捷射手","canonical_id":"DA_18_Rapidfire","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["裁决"],"entity_type":"trait","canonical_name":"裁决使","canonical_id":"DA_18_Executioner","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["猎手"],"entity_type":"trait","canonical_name":"猎人","canonical_id":"DA_18_Hunter","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["莲华"],"entity_type":"trait","canonical_name":"灵魂莲华","canonical_id":"DA_18_Blossom","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"},
+    {"aliases":["野怪"],"entity_type":"trait","canonical_name":"峡谷野怪","canonical_id":"DA_Riftbeast18","scope":"set","set_number":18,"source_refs":["project-reviewed"],"review_status":"approved"}
   ]
 }

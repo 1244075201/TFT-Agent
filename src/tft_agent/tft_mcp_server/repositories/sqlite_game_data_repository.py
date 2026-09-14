@@ -1626,12 +1626,6 @@ class SQLiteGameDataRepository:
                 (item.alias, item.canonical_id, item.entity_type, item.alias_kind)
                 for item in materialized
             ]
-            occupied = {item.alias.casefold() for item in materialized}
-            for identifier, kind, name, _source in entities:
-                if kind == "emblem" and name.endswith("纹章"):
-                    alias = name.removesuffix("纹章") + "转"
-                    if alias.casefold() not in occupied:
-                        aliases.append((alias, identifier, kind, "derived_emblem"))
             connection.executemany(
                 "INSERT OR IGNORE INTO entity_aliases VALUES (?,?,?,?,?,?)",
                 [

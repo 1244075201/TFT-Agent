@@ -66,6 +66,15 @@ class CanonicalEntityResolver:
                 _keep(matches, entry, canonical, "exact_canonical", 1.0)
             elif normalized_query in aliases:
                 _keep(matches, entry, normalized_query, "exact_alias", 1.0)
+        if len(matches) > 1:
+            exact_emblems = {
+                key: value for key, value in matches.items()
+                if value[0]["entity_type"] == "emblem"
+            }
+            if normalized_query.endswith(("纹章", "转", "转职")) and len(exact_emblems) == 1:
+                matches = exact_emblems
+            else:
+                matches.clear()
         if not matches:
             spans: list[tuple[int, dict[str, object], str, str]] = []
             for entry in catalog:
