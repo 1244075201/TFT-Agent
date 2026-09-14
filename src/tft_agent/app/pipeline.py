@@ -60,6 +60,15 @@ class ConversationSubject(StrictModel):
     source_turn_offset: int = Field(ge=0)
 
 
+class StrategyTurnState(StrictModel):
+    workspace: ProductMode
+    patch: str
+    raw_query: str
+    primary_composition: ResolvedEntity | None = None
+    candidate_compositions: list[ResolvedEntity] = Field(default_factory=list)
+    retrieval_seeds: list[ResolvedEntity] = Field(default_factory=list)
+
+
 class ChampionCompositionMatch(StrictModel):
     champion_id: str
     champion_name: str
@@ -169,6 +178,9 @@ class RetrievalTrace(StrictModel):
     structured_expansions: list[dict[str, Any]] = Field(default_factory=list)
     structured_candidate_comps: list[dict[str, Any]] = Field(default_factory=list)
     evidence_counts_by_type: dict[str, int] = Field(default_factory=dict)
+    strategy_state_inherited: bool = False
+    inherited_topic: str | None = None
+    inherited_candidate_ids: list[str] = Field(default_factory=list)
 
 
 class AnswerContext(StrictModel):
@@ -181,6 +193,8 @@ class AnswerContext(StrictModel):
     context_gaps: list[str] = Field(default_factory=list)
     knowledge_gaps: list[str] = Field(default_factory=list)
     retrieval_first: bool = False
+    previous_topic: str | None = None
+    current_candidates: list[ResolvedEntity] = Field(default_factory=list)
 
     def readable_summary(self) -> str:
         facts = _user_facts(self.game_state)
@@ -194,6 +208,16 @@ class AnswerContext(StrictModel):
                     "CURRENT GAMESTATE\n"
                     + ("\n".join(f"- {key}: {value}" for key, value in facts.items())
                        if facts else "- No structured facts provided")
+                )
+            if self.previous_topic:
+                blocks.append("PREVIOUS TOPIC\n" + self.previous_topic)
+            if self.current_candidates:
+                blocks.append(
+                    "CURRENT CANDIDATES "
+                    "(deterministically resolved follow-up composition scope)\n- "
+                    + "\n- ".join(
+                        item.display_name for item in self.current_candidates
+                    )
                 )
             blocks.append(
                 "RETRIEVED EVIDENCE\n"
@@ -577,7 +601,7 @@ def _composition_semantics(
 def _strategy_sections(intent: DecisionIntent, state: GameState) -> list[str]:
     if intent == DecisionIntent.FULL_GUIDE:
         return ["starting_conditions", "early_game", "mid_game", "late_game", "core",
-                "leveling"]
+                "tip", "leveling"]
     if intent == DecisionIntent.COMPOSITION_COMPARISON:
         return ["starting_conditions", "mid_game", "late_game", "core", "leveling",
                 "economy", "reroll_pattern"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable
 from time import perf_counter
 from typing import Any
@@ -26,6 +27,7 @@ from tft_agent.app.pipeline import (
     RetrievalTrace,
     RetrievedKnowledge,
     StateMutationIntent,
+    StrategyTurnState,
     apply_state_mutation,
     build_retrieval_plan,
     clean_template,
@@ -70,6 +72,7 @@ class AgentService:
         self._entity_resolver: CanonicalEntityResolver | None = None
         self._active_context: ActivePatchContext | None = None
         self._general_guide_resets: set[str] = set()
+        self._strategy_turn_states: dict[str, StrategyTurnState] = {}
         self.last_trace: RetrievalTrace | None = None
 
     def _repo(self) -> SQLiteGameDataRepository:
@@ -123,10 +126,12 @@ class AgentService:
 
     async def clear_session(self, session_id: str) -> None:
         await self._repo().clear_session(session_id)
+        self._strategy_turn_states.pop(session_id, None)
 
     async def clear_product_session(self, session_id: str, product_mode: ProductMode) -> None:
         scope = session_scope(session_id, product_mode)
         await self._repo().clear_session(scope.session_id)
+        self._strategy_turn_states.pop(scope.session_id, None)
         if product_mode == ProductMode.GENERAL_GUIDE:
             self._general_guide_resets.add(scope.session_id)
 
@@ -190,8 +195,21 @@ class AgentService:
             yield ChatEvent(type="error", message="实验实时模式默认关闭。")
             return
         product_mode = ProductMode(request.product_mode)
-        retrieval_first = is_strategy_open_query(request.text, product_mode)
         scope = session_scope(request.session_id, product_mode)
+        previous_strategy = self._strategy_turn_states.get(scope.session_id)
+        if previous_strategy and (
+            previous_strategy.patch != active_context.game_patch
+            or previous_strategy.workspace != product_mode
+        ):
+            self._strategy_turn_states.pop(scope.session_id, None)
+            previous_strategy = None
+        potential_strategy_followup = bool(
+            previous_strategy and _is_strategy_followup(request.text)
+        )
+        retrieval_first = (
+            is_strategy_open_query(request.text, product_mode)
+            or potential_strategy_followup
+        )
         conversation_reset = scope.session_id in self._general_guide_resets
         self._cancelled_sessions.discard(scope.session_id)
         started = perf_counter()
@@ -233,6 +251,11 @@ class AgentService:
             entity_start = perf_counter()
             resolution = await self._resolver(active_context).resolve(request.text)
             explicit_entities = list(resolution.entities)
+            strategy_state_inherited = bool(
+                potential_strategy_followup
+                and previous_strategy
+                and not resolution.entities
+            )
             entity_attempt = explicit_entity_attempt(request.text)
             subject_inherited = False
             inheritance_reason: str | None = None
@@ -244,6 +267,8 @@ class AgentService:
                 if entity_attempt else None
             )
             if (
+                not strategy_state_inherited
+                and
                 conversational_subject
                 and not resolution.entities
                 and unresolved_attempt is None
@@ -302,6 +327,35 @@ class AgentService:
                 resolution.entities, active_context
             )
             understanding = _apply_champion_strategy_route(understanding, champion_matches)
+            inherited_candidates: list[ResolvedEntity] = []
+            if strategy_state_inherited and previous_strategy:
+                inherited_candidates = _select_followup_candidates(
+                    request.text, previous_strategy
+                )
+                if _is_candidate_comparison(request.text):
+                    understanding = understanding.model_copy(update={
+                        "target_comp": None,
+                        "candidate_comps": inherited_candidates,
+                        "decision_intent": DecisionIntent.COMPOSITION_COMPARISON,
+                        "state_mutation": StateMutationIntent.CANDIDATES,
+                        "resolved_entities": previous_strategy.retrieval_seeds,
+                    })
+                elif len(inherited_candidates) == 1:
+                    understanding = understanding.model_copy(update={
+                        "target_comp": inherited_candidates[0],
+                        "candidate_comps": [],
+                        "decision_intent": DecisionIntent.FULL_GUIDE,
+                        "state_mutation": StateMutationIntent.RETAIN,
+                        "resolved_entities": previous_strategy.retrieval_seeds,
+                    })
+                else:
+                    understanding = understanding.model_copy(update={
+                        "target_comp": None,
+                        "candidate_comps": inherited_candidates,
+                        "decision_intent": DecisionIntent.FULL_GUIDE,
+                        "state_mutation": StateMutationIntent.CANDIDATES,
+                        "resolved_entities": previous_strategy.retrieval_seeds,
+                    })
             if retrieval_first:
                 understanding = understanding.model_copy(update={
                     "kind": QueryKind.STRATEGY_DECISION,
@@ -330,7 +384,19 @@ class AgentService:
             retrieval_queries: list[str] = []
             structured_seeds: list[dict[str, str]] = []
             structured_metadata: dict[str, Any] = {}
-            if retrieval_first:
+            if strategy_state_inherited and previous_strategy:
+                retrieval_queries = [
+                    request.text,
+                    previous_strategy.raw_query,
+                    *(item.display_name for item in inherited_candidates),
+                ]
+                knowledge, calls = await self._retrieve(request.text, plan)
+                structured_metadata = {
+                    "candidate_comps": [
+                        _candidate_trace_record(item) for item in inherited_candidates
+                    ]
+                }
+            elif retrieval_first:
                 seed_entities = list(resolution.entities)
                 if scope.uses_game_state:
                     state_seed_text = _state_relation_seed_text(state)
@@ -357,6 +423,9 @@ class AgentService:
                 history=history, retrieval_plan=plan, evidence=knowledge.evidence,
                 context_gaps=gaps, knowledge_gaps=knowledge.knowledge_gaps,
                 retrieval_first=retrieval_first,
+                previous_topic=(previous_strategy.raw_query
+                                if strategy_state_inherited and previous_strategy else None),
+                current_candidates=inherited_candidates,
             )
             context_summary = context.readable_summary()
             context_end = perf_counter()
@@ -391,6 +460,12 @@ class AgentService:
                     structured_metadata.get("candidate_comps", [])
                 ),
                 evidence_counts_by_type=_evidence_counts(knowledge.evidence),
+                strategy_state_inherited=strategy_state_inherited,
+                inherited_topic=(previous_strategy.raw_query
+                                 if strategy_state_inherited and previous_strategy else None),
+                inherited_candidate_ids=[
+                    item.canonical_id for item in inherited_candidates
+                ],
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -431,6 +506,10 @@ class AgentService:
             trace.stage_latency_ms["llm"] = (perf_counter() - llm_started) * 1000
             self.last_trace = trace
             await self._record_answer(request, outcome.response, scope.session_id)
+            if retrieval_first and not strategy_state_inherited:
+                turn_state = _strategy_turn_state_from_trace(trace, active_context)
+                if turn_state is not None:
+                    self._strategy_turn_states[scope.session_id] = turn_state
             yield ChatEvent(type="answer", message=outcome.response.recommendation,
                             response=outcome.response, advice_options=outcome.options,
                             retrieval_plan=trace.model_dump(mode="json"), context_gaps=gaps,
@@ -900,6 +979,89 @@ def _evidence_counts(evidence: list[EvidenceRecord]) -> dict[str, int]:
         category = categories.get(item.section, "STRATEGY TEXT")
         output[category] = output.get(category, 0) + 1
     return output
+
+
+def _is_strategy_followup(text: str) -> bool:
+    normalized = _normalized(text)
+    return bool(re.search(
+        r"(?:其他|另外|剩下|还有|这几个|这些|它们|几个|那.+呢|"
+        r"第(?:一|二|三|四|五|\d+)(?:个|套)?|"
+        r"哪个.*(?:前期|后期|适合)|有什么区别|区别)",
+        normalized,
+    ))
+
+
+def _is_candidate_comparison(text: str) -> bool:
+    return bool(re.search(r"这几个|这些|它们|区别|比较|哪个", text))
+
+
+def _select_followup_candidates(
+    text: str,
+    previous: StrategyTurnState,
+) -> list[ResolvedEntity]:
+    candidates = previous.candidate_compositions
+    ordinal = re.search(r"第(一|二|三|四|五|\d+)(?:个|套)?", text)
+    if ordinal:
+        value = ordinal.group(1)
+        index = ({"一": 1, "二": 2, "三": 3, "四": 4, "五": 5}.get(value)
+                 or int(value)) - 1
+        return [candidates[index]] if 0 <= index < len(candidates) else []
+    if re.search(r"其他|另外|剩下|还有", text):
+        primary_id = (
+            previous.primary_composition.canonical_id
+            if previous.primary_composition else None
+        )
+        return [item for item in candidates if item.canonical_id != primary_id]
+    return list(candidates)
+
+
+def _candidate_trace_record(entity: ResolvedEntity) -> dict[str, object]:
+    return {
+        "comp_id": entity.canonical_id,
+        "name": entity.display_name,
+        "source": "previous_strategy_turn",
+    }
+
+
+def _strategy_turn_state_from_trace(
+    trace: RetrievalTrace,
+    context: ActivePatchContext,
+) -> StrategyTurnState | None:
+    candidates: dict[str, ResolvedEntity] = {}
+    ordered = ([trace.understanding.target_comp]
+               if trace.understanding.target_comp else trace.understanding.candidate_comps)
+    for entity in ordered:
+        if entity is not None:
+            candidates[entity.canonical_id] = entity
+    for row in trace.structured_candidate_comps:
+        comp_id = str(row.get("comp_id") or "")
+        name = str(row.get("name") or "")
+        if not comp_id or not name or comp_id in candidates:
+            continue
+        candidates[comp_id] = ResolvedEntity(
+            canonical_id=comp_id,
+            entity_type="composition",
+            display_name=name,
+            game_patch=context.game_patch,
+            set_number=context.set_number,
+            set_name=context.set_name,
+            matched_alias=name,
+            match_kind="retrieval_candidate",
+            match_score=1.0,
+        )
+    if not candidates:
+        return None
+    values = list(candidates.values())
+    seeds = [item for item in trace.understanding.resolved_entities
+             if item.entity_type != "composition"]
+    return StrategyTurnState(
+        workspace=trace.workspace or trace.understanding.product_mode,
+        patch=context.game_patch,
+        raw_query=trace.original_query,
+        primary_composition=trace.understanding.target_comp or values[0],
+        candidate_compositions=values,
+        retrieval_seeds=seeds,
+    )
 
 
 def _broad_retrieval_queries(
