@@ -196,6 +196,10 @@ class SQLiteGameDataRepository:
     async def active_patch_context(self) -> ActivePatchContext | None:
         return await asyncio.to_thread(self._active_patch_context_sync)
 
+    async def grounding_entity_catalog(self) -> list[dict[str, object]]:
+        """Return known game-entity names across snapshots for output claim validation."""
+        return await asyncio.to_thread(self._grounding_entity_catalog_sync)
+
     async def patch_context(self, game_patch: str) -> ActivePatchContext | None:
         return await asyncio.to_thread(self._patch_context_sync, game_patch)
 
@@ -491,7 +495,9 @@ class SQLiteGameDataRepository:
         *,
         main_unit_cost_min: int | None,
         main_unit_cost_max: int | None,
+        cost_quantifier: str,
         strategy_terms: list[str],
+        strategy_exclusions: list[str],
         item_terms: list[str],
         require_strategy_match: bool,
         requested_fields: list[str],
@@ -500,7 +506,8 @@ class SQLiteGameDataRepository:
         """Execute the bounded semantic-discovery capability set."""
         return await asyncio.to_thread(
             self._discover_compositions_sync, snapshot_id, game_patch,
-            main_unit_cost_min, main_unit_cost_max, strategy_terms, item_terms,
+            main_unit_cost_min, main_unit_cost_max, cost_quantifier, strategy_terms,
+            strategy_exclusions, item_terms,
             require_strategy_match, requested_fields, limit,
         )
 
@@ -1659,13 +1666,40 @@ class SQLiteGameDataRepository:
             )
         return rows
 
+    def _grounding_entity_catalog_sync(self) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT canonical_id,entity_type,display_name FROM canonical_entities "
+                "UNION SELECT entity_id,entity_type,name FROM static_entities"
+            ).fetchall()
+            aliases = connection.execute(
+                "SELECT canonical_id,alias FROM entity_aliases"
+            ).fetchall()
+        by_id: dict[str, dict[str, object]] = {}
+        for row in rows:
+            canonical_id = str(row["canonical_id"])
+            by_id.setdefault(canonical_id, {
+                "canonical_id": canonical_id,
+                "entity_type": str(row["entity_type"]),
+                "display_name": str(row["display_name"]),
+                "aliases": [],
+            })
+        for row in aliases:
+            entry = by_id.get(str(row["canonical_id"]))
+            values = entry.get("aliases") if entry else None
+            if isinstance(values, list):
+                values.append(str(row["alias"]))
+        return list(by_id.values())
+
     def _discover_compositions_sync(
         self,
         snapshot_id: str,
         game_patch: str,
         main_unit_cost_min: int | None,
         main_unit_cost_max: int | None,
+        cost_quantifier: str,
         strategy_terms: list[str],
+        strategy_exclusions: list[str],
         item_terms: list[str],
         require_strategy_match: bool,
         requested_fields: list[str],
@@ -1674,6 +1708,9 @@ class SQLiteGameDataRepository:
         """Filter active-snapshot compositions using only normalized, existing fields."""
         strategy_terms = list(dict.fromkeys(
             _search_normalize(term) for term in strategy_terms if _search_normalize(term)
+        ))
+        strategy_exclusions = list(dict.fromkeys(
+            _search_normalize(term) for term in strategy_exclusions if _search_normalize(term)
         ))
         item_terms = list(dict.fromkeys(
             _search_normalize(term) for term in item_terms if _search_normalize(term)
@@ -1706,24 +1743,32 @@ class SQLiteGameDataRepository:
                     "FROM datatft_comp_board_units b WHERE b.snapshot_id=? AND b.comp_id=? "
                     "AND b.board_phase='FINAL' ORDER BY b.board_index", (snapshot_id, comp_id),
                 ).fetchall()
+                representative = connection.execute(
+                    "SELECT representative_canonical_champion_id FROM datatft_comp_metadata "
+                    "WHERE snapshot_id=? AND comp_id=?", (snapshot_id, comp_id),
+                ).fetchone()
+                representative_id = str(representative[0] or "") if representative else ""
+                representative_units = [
+                    row for row in board
+                    if str(row["canonical_champion_id"] or "") == representative_id
+                ]
                 mains = [row for row in board if int(row["is_main"] or 0) == 1]
-                if not mains:
-                    representative = connection.execute(
-                        "SELECT representative_canonical_champion_id FROM datatft_comp_metadata "
-                        "WHERE snapshot_id=? AND comp_id=?", (snapshot_id, comp_id),
-                    ).fetchone()
-                    representative_id = str(representative[0] or "") if representative else ""
-                    mains = [row for row in board
-                             if str(row["canonical_champion_id"] or "") == representative_id]
+                if cost_quantifier == "REPRESENTATIVE" or not mains:
+                    mains = representative_units
                 main_costs = [int(row["cost"]) for row in mains if row["cost"] is not None]
-                if main_unit_cost_min is not None and (
-                    not main_costs or min(main_costs) < main_unit_cost_min
-                ):
-                    continue
-                if main_unit_cost_max is not None and (
-                    not main_costs or max(main_costs) > main_unit_cost_max
-                ):
-                    continue
+                def in_range(cost: int) -> bool:
+                    return (
+                        (main_unit_cost_min is None or cost >= main_unit_cost_min)
+                        and (main_unit_cost_max is None or cost <= main_unit_cost_max)
+                    )
+                if main_unit_cost_min is not None or main_unit_cost_max is not None:
+                    matched_cost = bool(main_costs) and (
+                        all(in_range(cost) for cost in main_costs)
+                        if cost_quantifier == "ALL"
+                        else any(in_range(cost) for cost in main_costs)
+                    )
+                    if not matched_cost:
+                        continue
                 sections = connection.execute(
                     "SELECT section_type,ordinal,text,source_response_id "
                     "FROM datatft_comp_strategy_sections WHERE snapshot_id=? AND comp_id=? "
@@ -1732,6 +1777,11 @@ class SQLiteGameDataRepository:
                 strategy_matches = [row for row in sections if any(
                     term in _search_normalize(row["text"]) for term in strategy_terms
                 )]
+                if strategy_exclusions and any(
+                    term in _search_normalize(row["text"])
+                    for row in sections for term in strategy_exclusions
+                ):
+                    continue
                 if require_strategy_match and not strategy_matches:
                     continue
                 items = connection.execute(

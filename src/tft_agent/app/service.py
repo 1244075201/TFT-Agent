@@ -18,6 +18,7 @@ from tft_agent.app.pipeline import (
     ConversationSubject,
     DecisionIntent,
     EvidenceRecord,
+    KnowledgeIntent,
     ProductMode,
     QueryKind,
     QueryStateUnderstanding,
@@ -39,11 +40,13 @@ from tft_agent.app.pipeline import (
     is_strategy_open_query,
     is_topic_compatible_query,
     static_evidence,
+    structured_composition_list_limit,
     understand_query,
     unresolved_entity_fragment,
 )
 from tft_agent.app.semantic_retrieval import (
     PlannerOutcome,
+    RetrievalCapability,
     RetrievalPlannerClient,
     SemanticRetrievalPlan,
     is_semantic_discovery_query,
@@ -61,7 +64,10 @@ from tft_agent.core.schemas import (
     GameState,
 )
 from tft_agent.desktop.catalog import CanonicalEntityCatalog, CompositionCard
-from tft_agent.llm.grounded_decision import GroundedDecisionClient
+from tft_agent.llm.grounded_decision import (
+    GroundedDecisionClient,
+    enforce_closed_world_grounding,
+)
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
@@ -257,8 +263,16 @@ class AgentService:
             entity_start = perf_counter()
             resolution = await self._resolver(active_context).resolve(request.text)
             explicit_entities = list(resolution.entities)
+            preliminary_understanding = understand_query(
+                request.text, state, product_mode, resolution
+            )
             semantic_discovery = (
                 not potential_strategy_followup
+                and structured_composition_list_limit(request.text) is None
+                and preliminary_understanding.knowledge_intent not in {
+                    KnowledgeIntent.ENTITY_FACT,
+                    KnowledgeIntent.GENERAL_KNOWLEDGE,
+                }
                 and is_semantic_discovery_query(
                     request.text, {item.entity_type for item in resolution.entities}
                 )
@@ -333,9 +347,9 @@ class AgentService:
                         "active_comp_id": persisted_state.active_comp_id,
                     }
                 )
-            understanding = understand_query(
-                request.text, state, product_mode, resolution
-            )
+            # Routing needs an early read, but conversational inheritance can amend
+            # resolution. Build the operative understanding from that final resolution.
+            understanding = understand_query(request.text, state, product_mode, resolution)
             champion_matches, champion_calls = await self._champion_composition_matches(
                 resolution.entities, active_context
             )
@@ -421,6 +435,7 @@ class AgentService:
             elif semantic_discovery and planner_outcome is not None:
                 retrieval_queries = [
                     *planner_outcome.plan.strategy_searches,
+                    *planner_outcome.plan.strategy_exclusions,
                     *planner_outcome.plan.item_searches,
                 ]
                 knowledge, calls, structured_metadata = await self._retrieve_semantic(
@@ -501,7 +516,10 @@ class AgentService:
                 ],
                 route=("semantic_discovery" if semantic_discovery else
                        "strategy_followup" if strategy_state_inherited else
-                       "explicit_strategy" if retrieval_first else "deterministic"),
+                       "explicit_strategy" if retrieval_first else
+                       "deterministic_fact"
+                       if understanding.kind == QueryKind.DETERMINISTIC_LOOKUP else
+                       "legacy_open_strategy"),
                 planner_invoked=planner_outcome is not None,
                 planner_model=(planner_outcome.model if planner_outcome else None),
                 planner_used_fallback=(
@@ -515,6 +533,7 @@ class AgentService:
                 ),
                 planner_generated_search_concepts=(
                     [*planner_outcome.plan.strategy_searches,
+                     *planner_outcome.plan.strategy_exclusions,
                      *planner_outcome.plan.item_searches] if planner_outcome else []
                 ),
                 semantic_structured_filters=(
@@ -568,10 +587,16 @@ class AgentService:
                 outcome = await client.decide_context(context)
             finally:
                 await client.close()
+            catalog = await self._repo().grounding_entity_catalog()
+            grounding = enforce_closed_world_grounding(outcome, context, catalog)
+            outcome = grounding.outcome
             trace.llm_call_count = 1
             if planner_outcome:
                 trace.llm_call_count += 1
             trace.final_llm_calls = 1
+            trace.grounding_passed = not grounding.violations
+            trace.grounding_violations = grounding.violations
+            trace.grounding_fallback_used = grounding.used_fallback
             trace.stage_latency_ms["llm"] = (perf_counter() - llm_started) * 1000
             trace.stage_latency_ms["answer"] = trace.stage_latency_ms["llm"]
             trace.stage_latency_ms["total"] = (perf_counter() - started) * 1000
@@ -678,15 +703,32 @@ class AgentService:
         """Execute one validated discovery plan against the active snapshot."""
         started = perf_counter()
         filters = semantic.composition_filters
+        capabilities = set(semantic.capabilities)
+        use_cost = RetrievalCapability.FILTER_BY_MAIN_UNIT_COST in capabilities
+        use_strategy = RetrievalCapability.SEARCH_STRATEGY_TEXT in capabilities
+        use_item_search = RetrievalCapability.FIND_BY_ITEM_OR_ARTIFACT in capabilities
+        requested_fields = [field for field in semantic.requested_fields if (
+            field == "tier" or field == "main_units"
+            or field == "roster" and RetrievalCapability.GET_COMPOSITION_ROSTER in capabilities
+            or field == "items" and RetrievalCapability.GET_COMPOSITION_ITEMS in capabilities
+            or field in {"starting_conditions", "core", "early_game", "mid_game",
+                         "late_game", "tips"}
+            and bool(capabilities & {
+                RetrievalCapability.GET_COMPOSITION_STRATEGY,
+                RetrievalCapability.SEARCH_STRATEGY_TEXT,
+            })
+        )]
         result = await self._repo().discover_compositions(
             plan.active_snapshot_id,
             plan.game_patch,
-            main_unit_cost_min=filters.main_unit_cost_min,
-            main_unit_cost_max=filters.main_unit_cost_max,
-            strategy_terms=semantic.strategy_searches,
-            item_terms=semantic.item_searches,
-            require_strategy_match=filters.require_strategy_match,
-            requested_fields=semantic.requested_fields,
+            main_unit_cost_min=filters.main_unit_cost_min if use_cost else None,
+            main_unit_cost_max=filters.main_unit_cost_max if use_cost else None,
+            cost_quantifier=filters.cost_quantifier.value,
+            strategy_terms=semantic.strategy_searches if use_strategy else [],
+            strategy_exclusions=semantic.strategy_exclusions if use_strategy else [],
+            item_terms=semantic.item_searches if use_item_search else [],
+            require_strategy_match=filters.require_strategy_match and use_strategy,
+            requested_fields=requested_fields,
             limit=semantic.limit,
         )
         raw_evidence = result.get("evidence", [])
@@ -714,6 +756,7 @@ class AgentService:
                 "capabilities": [item.value for item in semantic.capabilities],
                 "composition_filters": filters.model_dump(mode="json"),
                 "strategy_searches": semantic.strategy_searches,
+                "strategy_exclusions": semantic.strategy_exclusions,
                 "item_searches": semantic.item_searches,
                 "requested_fields": semantic.requested_fields,
                 "limit": semantic.limit,

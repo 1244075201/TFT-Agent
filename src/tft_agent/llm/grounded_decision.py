@@ -19,6 +19,13 @@ class DecisionOutcome:
     options: list[AdviceOption]
 
 
+@dataclass(frozen=True)
+class GroundingValidation:
+    outcome: DecisionOutcome
+    violations: list[str]
+    used_fallback: bool
+
+
 class GroundedDecisionClient:
     """Make exactly one provider call for a strategy answer."""
 
@@ -97,6 +104,134 @@ def normalize_decision_output(content: str, context: AnswerContext) -> DecisionO
         alternatives=_string_list(data.get("alternatives")),
         used_tools=["structured_sqlite_retrieval", "text_retrieval"], sources=sources,
     ), [])
+
+
+def enforce_closed_world_grounding(
+    outcome: DecisionOutcome,
+    context: AnswerContext,
+    catalog: list[dict[str, object]],
+) -> GroundingValidation:
+    """Reject canonical entities and statistics unsupported by current-task evidence."""
+    response = outcome.response
+    answer_text = "\n".join([
+        response.recommendation, *response.reasoning, *response.next_steps,
+        *response.alternatives,
+    ])
+    evidence_text = json.dumps(
+        [item.model_dump(mode="json") for item in context.evidence], ensure_ascii=False
+    )
+    allowed_text = "\n".join((
+        context.question,
+        evidence_text,
+        json.dumps(context.game_state.model_dump(mode="json"), ensure_ascii=False),
+        " ".join(item.display_name for item in context.current_candidates),
+    ))
+    violations: list[str] = []
+    seen_entities: set[str] = set()
+    for row in catalog:
+        names = [str(row.get("display_name") or "")]
+        aliases = row.get("aliases")
+        if isinstance(aliases, list):
+            names.extend(str(alias) for alias in aliases)
+        for name in names:
+            normalized = name.strip()
+            if (
+                len(normalized) < 2
+                or normalized in seen_entities
+                or re.fullmatch(r"(?:\d+星)?\d+费(?:弈子|卡|单位)?", normalized)
+            ):
+                continue
+            if normalized in answer_text and normalized not in allowed_text:
+                violations.append(f"unsupported canonical entity: {normalized}")
+                seen_entities.add(normalized)
+                break
+    statistic_patterns = (
+        r"(?:胜率|前四率|登顶率|第一率|平均排名|top\s*4|win\s*rate|first\s*rate|"
+        r"average\s*placement)\s*(?:为|是|[:：])?\s*\d+(?:\.\d+)?%?",
+        r"\d+(?:\.\d+)?%?\s*(?:的)?\s*(?:胜率|前四率|登顶率|第一率|平均排名|"
+        r"top\s*4|win\s*rate|first\s*rate|average\s*placement)",
+    )
+    for pattern in statistic_patterns:
+        for match in re.finditer(pattern, answer_text, re.I):
+            claim = match.group(0)
+            if not _evidence_supports_statistic(claim, context):
+                violations.append(f"unsupported statistic: {claim[:80]}")
+    qualitative_statistic_patterns = (
+        r"(?:胜率|前四率|登顶率|第一率|平均排名)\s*(?:更|较|很|非常)?(?:高|低|好|差|领先)",
+        r"(?:更|较|很|非常)?(?:高|低|好|差|领先)\s*的?(?:胜率|前四率|登顶率|第一率|平均排名)",
+    )
+    if not _has_statistic_evidence(context):
+        for pattern in qualitative_statistic_patterns:
+            for match in re.finditer(pattern, answer_text):
+                violations.append(f"unsupported statistic: {match.group(0)[:80]}")
+    if not violations:
+        if context.retrieval_interpretation and not _has_statistic_evidence(context):
+            caveat = (
+                "当前证据不含胜率、前四率、登顶率或平均排名；以上只能视为攻略证据上的"
+                "定性筛选，不是统计排名。"
+            )
+            response = response.model_copy(update={
+                "recommendation": response.recommendation.rstrip() + "\n\n" + caveat
+            })
+            outcome = DecisionOutcome(response=response, options=outcome.options)
+        return GroundingValidation(outcome=outcome, violations=[], used_fallback=False)
+    candidates = list(dict.fromkeys(
+        item.display_name for item in context.evidence if item.entity_type == "composition"
+    ))
+    if candidates:
+        recommendation = (
+            f"当前 {context.retrieval_plan.game_patch} 检索证据只支持定性考虑："
+            + "、".join(candidates[:context.retrieval_plan.composition_limit])
+            + "。可以根据已检索到的攻略条件和运营阶段做选择，但现有证据不足以支持"
+              "回答中出现的额外游戏实体或统计排名。"
+        )
+    else:
+        recommendation = (
+            f"当前 {context.retrieval_plan.game_patch} 知识库没有足够检索证据支持这个判断；"
+            "我不能提供未经当前证据支持的游戏实体或统计比较。"
+        )
+    fallback = DecisionOutcome(
+        response=FinalResponse(
+            recommendation=recommendation,
+            used_tools=["closed_world_grounding_fallback"],
+            sources=[f"{item.display_name} · {item.section} — {item.url}"
+                     for item in context.evidence],
+        ),
+        options=[],
+    )
+    return GroundingValidation(
+        outcome=fallback, violations=list(dict.fromkeys(violations)), used_fallback=True
+    )
+
+
+def _evidence_supports_statistic(claim: str, context: AnswerContext) -> bool:
+    keys = {
+        "胜率": "win_rate", "win rate": "win_rate",
+        "前四率": "top4_rate", "top4": "top4_rate", "top 4": "top4_rate",
+        "登顶率": "first_rate", "第一率": "first_rate", "first rate": "first_rate",
+        "平均排名": "average_place", "average placement": "average_place",
+    }
+    lowered = claim.casefold()
+    expected = next((key for label, key in keys.items() if label in lowered), None)
+    numbers = re.findall(r"\d+(?:\.\d+)?%?", claim)
+    if expected is None or not numbers:
+        return False
+    for evidence in context.evidence:
+        if not isinstance(evidence.semantic_content, dict):
+            continue
+        value = evidence.semantic_content.get(expected)
+        if value is not None and any(number in str(value) for number in numbers):
+            return True
+    return False
+
+
+def _has_statistic_evidence(context: AnswerContext) -> bool:
+    keys = {"win_rate", "top4_rate", "first_rate", "average_place"}
+    return any(
+        isinstance(item.semantic_content, dict)
+        and any(item.semantic_content.get(key) is not None for key in keys)
+        for item in context.evidence
+    )
 
 
 def _extract_object(content: str) -> dict[str, Any] | None:

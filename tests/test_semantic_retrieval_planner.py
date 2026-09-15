@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -11,15 +13,20 @@ import tft_agent.app.service as service_module
 from tft_agent.app.pipeline import AnswerContext, ProductMode
 from tft_agent.app.semantic_retrieval import (
     CompositionFilters,
+    CostQuantifier,
     PlannerOutcome,
     RetrievalCapability,
     SemanticRetrievalPlan,
+    is_semantic_discovery_query,
     validate_plan_payload,
 )
 from tft_agent.app.service import AgentService
 from tft_agent.core.config import Settings
 from tft_agent.core.schemas import ChatEvent, ChatRequest, FinalResponse
-from tft_agent.llm.grounded_decision import DecisionOutcome
+from tft_agent.llm.grounded_decision import DecisionOutcome, enforce_closed_world_grounding
+from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
+    SQLiteGameDataRepository,
+)
 
 
 class _Planner:
@@ -159,6 +166,22 @@ async def test_semantic_candidates_support_followup_without_second_planner(
     assert _Planner.calls == 1
 
 
+@pytest.mark.asyncio
+async def test_descriptive_preference_does_not_become_unresolved_entity(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(service_module, "RetrievalPlannerClient", _Planner)
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _Answerer)
+    service = AgentService(settings)
+    await _ask(service, "我想玩节奏快一点的阵容", "descriptive")
+    trace = service.last_trace
+    assert trace is not None
+    assert trace.route == "semantic_discovery"
+    assert trace.planner_invoked is True
+    assert trace.explicit_unresolved_term is None
+    assert trace.final_resolution_category.value != "unresolved_entity"
+
+
 def test_plan_rejects_sql_unknown_capability_and_patch_override() -> None:
     base = {
         "user_goal": "find comps",
@@ -169,6 +192,7 @@ def test_plan_rejects_sql_unknown_capability_and_patch_override() -> None:
     for illegal in (
         {**base, "sql": "SELECT * FROM datatft_comps"},
         {**base, "capabilities": ["RUN_SQL"]},
+        {**base, "capabilities": ["FIND_BY_TRAIT"]},
         {**base, "patch": "18.1"},
     ):
         with pytest.raises((ValidationError, ValueError)):
@@ -192,3 +216,154 @@ def test_low_cost_reroll_plan_differs_from_low_cost_only() -> None:
     assert reroll.composition_filters.require_strategy_match is True
     assert low_cost.composition_filters.require_strategy_match is False
     assert low_cost.strategy_searches == []
+
+
+@pytest.mark.parametrize("query", [
+    "这版本两费主c的阵容有什么",
+    "三费主C能玩什么",
+    "我想玩节奏快一点的阵容",
+    "我想玩稳一点的",
+    "后期上限高一点的阵容",
+    "有没有不太吃五费卡的",
+    "比较容易成型的有什么",
+    "我不想赌三星，有什么低费核心阵容",
+    "有哪些阵容能吃烂分 哪些能吃鸡",
+])
+def test_attribute_discovery_does_not_require_preference_keyword_list(query: str) -> None:
+    assert is_semantic_discovery_query(query, set()) is True
+
+
+def test_declared_capability_requires_executable_parameters() -> None:
+    base = {"user_goal": "discover", "requested_fields": ["tier"], "limit": 8}
+    with pytest.raises(ValueError, match="required parameters"):
+        validate_plan_payload({
+            **base,
+            "capabilities": ["FILTER_BY_MAIN_UNIT_COST"],
+        })
+    with pytest.raises(ValueError, match="required parameters"):
+        validate_plan_payload({
+            **base,
+            "capabilities": ["SEARCH_STRATEGY_TEXT"],
+        })
+    normalized = validate_plan_payload({
+        **base,
+        "capabilities": ["LIST_COMPOSITIONS"],
+        "strategy_exclusions": ["excluded concept"],
+    })
+    assert RetrievalCapability.SEARCH_STRATEGY_TEXT in normalized.capabilities
+
+
+def test_generic_cost_plans_share_capability_and_vary_only_range() -> None:
+    ranges = ((1, 1), (2, 2), (3, 3), (1, 2))
+    plans = [validate_plan_payload({
+        "user_goal": "cost constrained discovery",
+        "capabilities": ["LIST_COMPOSITIONS", "FILTER_BY_MAIN_UNIT_COST"],
+        "composition_filters": {
+            "main_unit_cost_min": low,
+            "main_unit_cost_max": high,
+            "cost_quantifier": "ANY",
+            "require_strategy_match": False,
+        },
+        "requested_fields": ["tier", "main_units"],
+        "limit": 8,
+    }) for low, high in ranges]
+    assert {
+        tuple(plan.capabilities) for plan in plans
+    } == {(
+        RetrievalCapability.LIST_COMPOSITIONS,
+        RetrievalCapability.FILTER_BY_MAIN_UNIT_COST,
+    )}
+    assert [(plan.composition_filters.main_unit_cost_min,
+             plan.composition_filters.main_unit_cost_max) for plan in plans] == list(ranges)
+
+
+@pytest.mark.asyncio
+async def test_main_carry_cost_quantifier_any_is_not_all(
+    settings: Settings,
+) -> None:
+    with sqlite3.connect(settings.database_path) as connection:
+        snapshot = connection.execute(
+            "SELECT active_snapshot_id FROM game_patches WHERE status='active'"
+        ).fetchone()[0]
+        comp_id = connection.execute(
+            "SELECT comp_id FROM datatft_comps WHERE snapshot_id=? AND name=?",
+            (snapshot, "主宰女警"),
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE datatft_comp_board_units SET is_main=1 WHERE snapshot_id=? "
+            "AND comp_id=? AND display_name IN (?,?)",
+            (snapshot, comp_id, "凯特琳", "希维尔"),
+        )
+    repository = SQLiteGameDataRepository(settings.database_path)
+    common = dict(
+        snapshot_id=snapshot, game_patch="18.2",
+        main_unit_cost_min=2, main_unit_cost_max=2,
+        strategy_terms=[], item_terms=[], require_strategy_match=False,
+        strategy_exclusions=[],
+        requested_fields=["tier", "main_units"], limit=12,
+    )
+    any_result = await repository.discover_compositions(
+        **common, cost_quantifier=CostQuantifier.ANY.value,
+    )
+    all_result = await repository.discover_compositions(
+        **common, cost_quantifier=CostQuantifier.ALL.value,
+    )
+    any_rows = cast(list[dict[str, object]], any_result["candidate_comps"])
+    all_rows = cast(list[dict[str, object]], all_result["candidate_comps"])
+    any_names = {row["name"] for row in any_rows}
+    all_names = {row["name"] for row in all_rows}
+    assert "主宰女警" in any_names
+    assert "主宰女警" not in all_names
+
+
+def test_closed_world_rejects_hallucinated_entity_and_statistics() -> None:
+    from tft_agent.app.pipeline import QueryStateUnderstanding, RetrievalPlan
+
+    context = AnswerContext(
+        question="有哪些阵容比较稳定",
+        understanding=QueryStateUnderstanding(
+            kind="strategy_decision", product_mode="general_guide",
+        ),
+        game_state={},
+        retrieval_plan=RetrievalPlan(
+            game_patch="18.2", set_number=18, set_name="test",
+        ),
+        evidence=[],
+        retrieval_first=True,
+    )
+    unsafe = DecisionOutcome(FinalResponse(
+        recommendation="纳亚菲利前四率63.7%，平均排名3.89。",
+        reasoning=["这套阵容胜率很高。"],
+    ), [])
+    result = enforce_closed_world_grounding(unsafe, context, [{
+        "display_name": "纳亚菲利", "aliases": [], "entity_type": "champion",
+    }])
+    assert result.used_fallback is True
+    assert any("canonical entity" in value for value in result.violations)
+    assert any("statistic" in value for value in result.violations)
+    assert any("胜率很高" in value for value in result.violations)
+    assert "纳亚菲利" not in result.outcome.response.recommendation
+    assert "63.7" not in result.outcome.response.recommendation
+
+
+def test_closed_world_allows_only_statistics_present_in_evidence() -> None:
+    from tft_agent.app.pipeline import EvidenceRecord, QueryStateUnderstanding, RetrievalPlan
+
+    evidence = EvidenceRecord(
+        evidence_id="stats", source="test", requested_patch="18.2", source_patch="18.2",
+        patch_match="exact", entity_type="composition", canonical_entity_id="comp-1",
+        display_name="测试阵容", section="composition",
+        semantic_content={"top4_rate": "63.7%"}, relevance_score=1, url="test",
+    )
+    context = AnswerContext(
+        question="表现如何",
+        understanding=QueryStateUnderstanding(
+            kind="strategy_decision", product_mode="general_guide",
+        ), game_state={}, evidence=[evidence],
+        retrieval_plan=RetrievalPlan(game_patch="18.2", set_number=18, set_name="test"),
+    )
+    safe = DecisionOutcome(FinalResponse(recommendation="测试阵容前四率63.7%。"), [])
+    result = enforce_closed_world_grounding(safe, context, [{
+        "display_name": "测试阵容", "aliases": [], "entity_type": "composition",
+    }])
+    assert result.used_fallback is False

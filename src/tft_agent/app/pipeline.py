@@ -193,6 +193,9 @@ class RetrievalTrace(StrictModel):
     retrieval_actions: list[str] = Field(default_factory=list)
     candidate_compositions: list[str] = Field(default_factory=list)
     final_llm_calls: int = Field(default=0, ge=0)
+    grounding_passed: bool = True
+    grounding_violations: list[str] = Field(default_factory=list)
+    grounding_fallback_used: bool = False
 
 
 class AnswerContext(StrictModel):
@@ -421,6 +424,8 @@ def explicit_entity_attempt(text: str) -> str | None:
         if not match:
             continue
         term = match.group("term").strip(" ，,。！？!?")
+        if re.fullmatch(r".+的(?:阵容)?", term):
+            return None
         if term and term not in {
             "那", "这个", "这个阵容", "这套", "这套阵容", "它", "阵容",
         }:
