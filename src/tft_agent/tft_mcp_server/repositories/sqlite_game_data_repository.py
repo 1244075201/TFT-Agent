@@ -101,7 +101,7 @@ def _relation_search_document(
     comp_name: object,
     section: str,
     canonical_id: object,
-    semantic_content: str | dict[str, object],
+    semantic_content: str | list[dict[str, object]] | dict[str, object],
     suffix: str,
     *,
     source_response_id: object = None,
@@ -482,6 +482,26 @@ class SQLiteGameDataRepository:
             game_patch,
             list(seeds),
             candidate_limit,
+        )
+
+    async def discover_compositions(
+        self,
+        snapshot_id: str,
+        game_patch: str,
+        *,
+        main_unit_cost_min: int | None,
+        main_unit_cost_max: int | None,
+        strategy_terms: list[str],
+        item_terms: list[str],
+        require_strategy_match: bool,
+        requested_fields: list[str],
+        limit: int,
+    ) -> dict[str, object]:
+        """Execute the bounded semantic-discovery capability set."""
+        return await asyncio.to_thread(
+            self._discover_compositions_sync, snapshot_id, game_patch,
+            main_unit_cost_min, main_unit_cost_max, strategy_terms, item_terms,
+            require_strategy_match, requested_fields, limit,
         )
 
     async def rebuild_canonical_catalog(
@@ -1638,6 +1658,147 @@ class SQLiteGameDataRepository:
                 query, tokens, None, limit, strategy_comp_name, "unversioned"
             )
         return rows
+
+    def _discover_compositions_sync(
+        self,
+        snapshot_id: str,
+        game_patch: str,
+        main_unit_cost_min: int | None,
+        main_unit_cost_max: int | None,
+        strategy_terms: list[str],
+        item_terms: list[str],
+        require_strategy_match: bool,
+        requested_fields: list[str],
+        limit: int,
+    ) -> dict[str, object]:
+        """Filter active-snapshot compositions using only normalized, existing fields."""
+        strategy_terms = list(dict.fromkeys(
+            _search_normalize(term) for term in strategy_terms if _search_normalize(term)
+        ))
+        item_terms = list(dict.fromkeys(
+            _search_normalize(term) for term in item_terms if _search_normalize(term)
+        ))
+        with self._connect() as connection:
+            snapshot = connection.execute(
+                "SELECT source_url FROM datatft_snapshots WHERE snapshot_id=? AND game_patch=?",
+                (snapshot_id, game_patch),
+            ).fetchone()
+            if snapshot is None:
+                return {"evidence": [], "candidate_comps": []}
+            comps = connection.execute(
+                "SELECT comp_id,name,tier,source_response_id FROM datatft_comps "
+                "WHERE snapshot_id=? ORDER BY name", (snapshot_id,),
+            ).fetchall()
+            candidates: list[dict[str, object]] = []
+            evidence: list[dict[str, object]] = []
+            requested = set(requested_fields)
+            strategy_fields = requested & {
+                "starting_conditions", "core", "early_game", "mid_game", "late_game", "tips",
+            }
+            section_names = {"tips": "tip", **{name: name for name in strategy_fields}}
+            for comp in comps:
+                comp_id = str(comp["comp_id"])
+                board = connection.execute(
+                    "SELECT b.display_name,b.canonical_champion_id,b.stars,b.is_main,b.board_index,"
+                    "(SELECT ch.cost FROM champions ch WHERE "
+                    "ch.champion_id=b.canonical_champion_id "
+                    "ORDER BY ch.retrieved_at DESC LIMIT 1) cost,b.source_response_id "
+                    "FROM datatft_comp_board_units b WHERE b.snapshot_id=? AND b.comp_id=? "
+                    "AND b.board_phase='FINAL' ORDER BY b.board_index", (snapshot_id, comp_id),
+                ).fetchall()
+                mains = [row for row in board if int(row["is_main"] or 0) == 1]
+                if not mains:
+                    representative = connection.execute(
+                        "SELECT representative_canonical_champion_id FROM datatft_comp_metadata "
+                        "WHERE snapshot_id=? AND comp_id=?", (snapshot_id, comp_id),
+                    ).fetchone()
+                    representative_id = str(representative[0] or "") if representative else ""
+                    mains = [row for row in board
+                             if str(row["canonical_champion_id"] or "") == representative_id]
+                main_costs = [int(row["cost"]) for row in mains if row["cost"] is not None]
+                if main_unit_cost_min is not None and (
+                    not main_costs or min(main_costs) < main_unit_cost_min
+                ):
+                    continue
+                if main_unit_cost_max is not None and (
+                    not main_costs or max(main_costs) > main_unit_cost_max
+                ):
+                    continue
+                sections = connection.execute(
+                    "SELECT section_type,ordinal,text,source_response_id "
+                    "FROM datatft_comp_strategy_sections WHERE snapshot_id=? AND comp_id=? "
+                    "ORDER BY section_type,ordinal", (snapshot_id, comp_id),
+                ).fetchall()
+                strategy_matches = [row for row in sections if any(
+                    term in _search_normalize(row["text"]) for term in strategy_terms
+                )]
+                if require_strategy_match and not strategy_matches:
+                    continue
+                items = connection.execute(
+                    "SELECT holder_display_name,item_display_name,canonical_item_id,plan_index,"
+                    "slot_index,source_response_id FROM datatft_comp_item_plan_items "
+                    "WHERE snapshot_id=? AND comp_id=? ORDER BY plan_index,slot_index",
+                    (snapshot_id, comp_id),
+                ).fetchall()
+                item_matches = [row for row in items if any(
+                    term in _search_normalize(
+                        f"{row['holder_display_name']} {row['item_display_name']}"
+                    ) for term in item_terms
+                )]
+                if item_terms and not item_matches:
+                    continue
+                signals: list[str] = []
+                if main_costs:
+                    signals.append("main_unit_cost")
+                if strategy_matches:
+                    signals.append("strategy_text_match")
+                if item_matches:
+                    signals.append("item_plan_match")
+                candidates.append({
+                    "comp_id": comp_id, "name": str(comp["name"]), "tier": comp["tier"],
+                    "main_units": [{"name": str(row["display_name"]), "cost": row["cost"],
+                                    "stars": row["stars"]} for row in mains],
+                    "signals": signals,
+                })
+                common = (snapshot_id, game_patch, str(snapshot["source_url"]), comp_id,
+                          str(comp["name"]))
+                evidence.append(_relation_search_document(
+                    *common, "candidate_composition", comp_id,
+                    {"tier": comp["tier"], "main_units": candidates[-1]["main_units"],
+                     "qualification_signals": signals,
+                     "retrieval_order_is_not_strength_ranking": True},
+                    f"semantic:candidate:{comp_id}", source_response_id=comp["source_response_id"],
+                ))
+                selected_sections = [
+                    row for row in sections
+                    if row in strategy_matches
+                    or row["section_type"] in set(section_names.values())
+                ]
+                for row in selected_sections:
+                    evidence.append(_relation_search_document(
+                        *common, str(row["section_type"]), comp_id, str(row["text"]),
+                        f"semantic:strategy:{comp_id}:{row['section_type']}:{row['ordinal']}",
+                        source_response_id=row["source_response_id"],
+                    ))
+                if "roster" in requested:
+                    evidence.append(_relation_search_document(
+                        *common, "composition_roster", comp_id,
+                        [{"name": row["display_name"], "stars": row["stars"],
+                          "is_main": bool(row["is_main"])} for row in board],
+                        f"semantic:roster:{comp_id}",
+                    ))
+                if "items" in requested and items:
+                    evidence.append(_relation_search_document(
+                        *common, "item_plan", comp_id,
+                        [{"holder": row["holder_display_name"], "item": row["item_display_name"],
+                          "plan": row["plan_index"], "slot": row["slot_index"]}
+                         for row in items], f"semantic:items:{comp_id}",
+                    ))
+                if len(candidates) >= limit:
+                    break
+        selected_ids = {str(row["comp_id"]) for row in candidates}
+        return {"candidate_comps": candidates,
+                "evidence": [row for row in evidence if str(row["comp_id"]) in selected_ids]}
 
     def _search_normalized_knowledge_sync(
         self,

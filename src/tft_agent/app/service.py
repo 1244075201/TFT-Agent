@@ -42,6 +42,12 @@ from tft_agent.app.pipeline import (
     understand_query,
     unresolved_entity_fragment,
 )
+from tft_agent.app.semantic_retrieval import (
+    PlannerOutcome,
+    RetrievalPlannerClient,
+    SemanticRetrievalPlan,
+    is_semantic_discovery_query,
+)
 from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
 from tft_agent.core.patches import PatchService
@@ -251,6 +257,13 @@ class AgentService:
             entity_start = perf_counter()
             resolution = await self._resolver(active_context).resolve(request.text)
             explicit_entities = list(resolution.entities)
+            semantic_discovery = (
+                not potential_strategy_followup
+                and is_semantic_discovery_query(
+                    request.text, {item.entity_type for item in resolution.entities}
+                )
+            )
+            retrieval_first = retrieval_first or semantic_discovery
             strategy_state_inherited = bool(
                 potential_strategy_followup
                 and previous_strategy
@@ -375,6 +388,15 @@ class AgentService:
                     )
             state = apply_state_mutation(state, understanding, request.text)
             entity_end = perf_counter()
+            planner_outcome: PlannerOutcome | None = None
+            if semantic_discovery:
+                planner = RetrievalPlannerClient(self.settings)
+                try:
+                    planner_outcome = await planner.plan(
+                        request.text, state if scope.uses_game_state else None
+                    )
+                finally:
+                    await planner.close()
             plan = build_retrieval_plan(
                 understanding, state, active_context.game_patch,
                 active_context.set_number, active_context.set_name,
@@ -396,6 +418,14 @@ class AgentService:
                         _candidate_trace_record(item) for item in inherited_candidates
                     ]
                 }
+            elif semantic_discovery and planner_outcome is not None:
+                retrieval_queries = [
+                    *planner_outcome.plan.strategy_searches,
+                    *planner_outcome.plan.item_searches,
+                ]
+                knowledge, calls, structured_metadata = await self._retrieve_semantic(
+                    planner_outcome.plan, plan
+                )
             elif retrieval_first:
                 seed_entities = list(resolution.entities)
                 if scope.uses_game_state:
@@ -426,6 +456,9 @@ class AgentService:
                 previous_topic=(previous_strategy.raw_query
                                 if strategy_state_inherited and previous_strategy else None),
                 current_candidates=inherited_candidates,
+                retrieval_interpretation=(
+                    planner_outcome.plan.user_goal if planner_outcome else None
+                ),
             )
             context_summary = context.readable_summary()
             context_end = perf_counter()
@@ -466,12 +499,45 @@ class AgentService:
                 inherited_candidate_ids=[
                     item.canonical_id for item in inherited_candidates
                 ],
+                route=("semantic_discovery" if semantic_discovery else
+                       "strategy_followup" if strategy_state_inherited else
+                       "explicit_strategy" if retrieval_first else "deterministic"),
+                planner_invoked=planner_outcome is not None,
+                planner_model=(planner_outcome.model if planner_outcome else None),
+                planner_used_fallback=(
+                    planner_outcome.used_fallback if planner_outcome else False
+                ),
+                planner_validation_error=(
+                    planner_outcome.validation_error if planner_outcome else None
+                ),
+                validated_semantic_plan=(
+                    planner_outcome.plan.model_dump(mode="json") if planner_outcome else None
+                ),
+                planner_generated_search_concepts=(
+                    [*planner_outcome.plan.strategy_searches,
+                     *planner_outcome.plan.item_searches] if planner_outcome else []
+                ),
+                semantic_structured_filters=(
+                    planner_outcome.plan.composition_filters.model_dump(mode="json")
+                    if planner_outcome else {}
+                ),
+                retrieval_actions=(
+                    [item.value for item in planner_outcome.plan.capabilities]
+                    if planner_outcome else [call.operation for call in calls]
+                ),
+                candidate_compositions=[
+                    str(item.get("name")) for item in
+                    structured_metadata.get("candidate_comps", [])
+                    if isinstance(item, dict) and item.get("name")
+                ],
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
                     "retrieval": (retrieval_end - plan_end) * 1000,
                     "context": (context_end - retrieval_end) * 1000,
                     "local_total": (context_end - started) * 1000,
+                    **({"planner": planner_outcome.latency_ms}
+                       if planner_outcome else {}),
                 },
             )
             self.last_trace = trace
@@ -503,7 +569,12 @@ class AgentService:
             finally:
                 await client.close()
             trace.llm_call_count = 1
+            if planner_outcome:
+                trace.llm_call_count += 1
+            trace.final_llm_calls = 1
             trace.stage_latency_ms["llm"] = (perf_counter() - llm_started) * 1000
+            trace.stage_latency_ms["answer"] = trace.stage_latency_ms["llm"]
+            trace.stage_latency_ms["total"] = (perf_counter() - started) * 1000
             self.last_trace = trace
             await self._record_answer(request, outcome.response, scope.session_id)
             if retrieval_first and not strategy_state_inherited:
@@ -513,7 +584,7 @@ class AgentService:
             yield ChatEvent(type="answer", message=outcome.response.recommendation,
                             response=outcome.response, advice_options=outcome.options,
                             retrieval_plan=trace.model_dump(mode="json"), context_gaps=gaps,
-                            llm_call_count=1)
+                            llm_call_count=trace.llm_call_count)
         except asyncio.CancelledError:
             yield ChatEvent(type="cancelled", message="请求已取消")
         except Exception as exc:
@@ -600,6 +671,63 @@ class AgentService:
             "candidate_comps": candidate_rows,
         }
         return RetrievedKnowledge(evidence=evidence, knowledge_gaps=gaps), [call], metadata
+
+    async def _retrieve_semantic(
+        self, semantic: SemanticRetrievalPlan, plan: RetrievalPlan,
+    ) -> tuple[RetrievedKnowledge, list[RepositoryCall], dict[str, Any]]:
+        """Execute one validated discovery plan against the active snapshot."""
+        started = perf_counter()
+        filters = semantic.composition_filters
+        result = await self._repo().discover_compositions(
+            plan.active_snapshot_id,
+            plan.game_patch,
+            main_unit_cost_min=filters.main_unit_cost_min,
+            main_unit_cost_max=filters.main_unit_cost_max,
+            strategy_terms=semantic.strategy_searches,
+            item_terms=semantic.item_searches,
+            require_strategy_match=filters.require_strategy_match,
+            requested_fields=semantic.requested_fields,
+            limit=semantic.limit,
+        )
+        raw_evidence = result.get("evidence", [])
+        rows = raw_evidence if isinstance(raw_evidence, list) else []
+        raw_candidates = result.get("candidate_comps", [])
+        candidates = raw_candidates if isinstance(raw_candidates, list) else []
+        evidence = [EvidenceRecord(requested_patch=plan.game_patch, **row)
+                    for row in rows if isinstance(row, dict)]
+        gaps: list[str] = []
+        if not evidence:
+            gaps.append("validated semantic plan found no qualifying active-snapshot evidence")
+        if any(
+            field in semantic.requested_fields
+            for field in ("early_game", "starting_conditions")
+        ):
+            gaps.append(
+                "no stage win-rate evidence is available; early strength can only be inferred "
+                "from retrieved guide descriptions"
+            )
+        call = RepositoryCall(
+            operation="execute_semantic_retrieval_plan",
+            filters={
+                "game_patch": plan.game_patch,
+                "snapshot_id": plan.active_snapshot_id,
+                "capabilities": [item.value for item in semantic.capabilities],
+                "composition_filters": filters.model_dump(mode="json"),
+                "strategy_searches": semantic.strategy_searches,
+                "item_searches": semantic.item_searches,
+                "requested_fields": semantic.requested_fields,
+                "limit": semantic.limit,
+            },
+            result_count=len(evidence), latency_ms=(perf_counter() - started) * 1000,
+        )
+        return (
+            RetrievedKnowledge(evidence=evidence, knowledge_gaps=gaps),
+            [call],
+            {"candidate_comps": candidates, "text_hits": sum(
+                item.section not in {"candidate_composition", "composition_roster", "item_plan"}
+                for item in evidence
+            )},
+        )
 
     async def _conversation_subject(
         self, rows: list[tuple[str, str]], context: ActivePatchContext

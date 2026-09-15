@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
@@ -122,7 +123,7 @@ class EvidenceRecord(StrictModel):
     canonical_entity_id: str
     display_name: str
     section: str
-    semantic_content: str | list[str] | dict[str, Any]
+    semantic_content: str | list[Any] | dict[str, Any]
     relevance_score: float = Field(ge=0, le=1)
     url: str
     snapshot_id: str | None = None
@@ -181,6 +182,17 @@ class RetrievalTrace(StrictModel):
     strategy_state_inherited: bool = False
     inherited_topic: str | None = None
     inherited_candidate_ids: list[str] = Field(default_factory=list)
+    route: str = "legacy"
+    planner_invoked: bool = False
+    planner_model: str | None = None
+    planner_used_fallback: bool = False
+    planner_validation_error: str | None = None
+    validated_semantic_plan: dict[str, Any] | None = None
+    planner_generated_search_concepts: list[str] = Field(default_factory=list)
+    semantic_structured_filters: dict[str, Any] = Field(default_factory=dict)
+    retrieval_actions: list[str] = Field(default_factory=list)
+    candidate_compositions: list[str] = Field(default_factory=list)
+    final_llm_calls: int = Field(default=0, ge=0)
 
 
 class AnswerContext(StrictModel):
@@ -195,6 +207,7 @@ class AnswerContext(StrictModel):
     retrieval_first: bool = False
     previous_topic: str | None = None
     current_candidates: list[ResolvedEntity] = Field(default_factory=list)
+    retrieval_interpretation: str | None = None
 
     def readable_summary(self) -> str:
         facts = _user_facts(self.game_state)
@@ -211,6 +224,10 @@ class AnswerContext(StrictModel):
                 )
             if self.previous_topic:
                 blocks.append("PREVIOUS TOPIC\n" + self.previous_topic)
+            if self.retrieval_interpretation:
+                blocks.append(
+                    "RETRIEVAL INTERPRETATION\n" + self.retrieval_interpretation
+                )
             if self.current_candidates:
                 blocks.append(
                     "CURRENT CANDIDATES "
@@ -641,7 +658,18 @@ def _format_evidence(item: EvidenceRecord) -> str:
     )
 
 
-def _semantic_text(content: str | list[str] | dict[str, Any]) -> str:
+def _semantic_text(content: str | list[Any] | dict[str, Any]) -> str:
+    if isinstance(content, list) and all(isinstance(row, dict) for row in content):
+        rows = [row for row in content if isinstance(row, dict)]
+        if rows and "holder" in rows[0]:
+            return format_item_plans(rows)
+        if rows and "name" in rows[0]:
+            return "、".join(
+                f"{row.get('name') or '未解析棋子'}"
+                + (f"（{row.get('stars')}星）" if row.get("stars") else "")
+                + ("（主核）" if row.get("is_main") else "")
+                for row in rows
+            )
     if not isinstance(content, dict):
         return str(content)
     units = content.get("units")
@@ -672,6 +700,30 @@ def _semantic_text(content: str | list[str] | dict[str, Any]) -> str:
             f"{row.get('kind') or '条件'}：{row.get('name') or row.get('type') or '未命名'}"
             for row in conditions if isinstance(row, dict)
         )
+    main_units = content.get("main_units")
+    if isinstance(main_units, list):
+        rendered = "、".join(
+            f"{row.get('name') or '未解析棋子'}"
+            + (f"（{row.get('cost')}费）" if row.get("cost") else "")
+            + (f"（{row.get('stars')}星）" if row.get("stars") else "")
+            for row in main_units if isinstance(row, dict)
+        )
+        tier = content.get("tier")
+        signals = content.get("qualification_signals")
+        labels = {
+            "main_unit_cost": "主核费用筛选",
+            "strategy_text_match": "攻略语义匹配",
+            "item_plan_match": "装备方案匹配",
+        }
+        signal_text = (
+            "、".join(labels.get(str(value), "已验证条件") for value in signals)
+            if isinstance(signals, list) else ""
+        )
+        return "；".join(filter(None, (
+            f"评级：{tier}" if tier else "", f"主核：{rendered}" if rendered else "",
+            f"候选依据：{signal_text}" if signal_text else "",
+            "检索顺序不代表强度排名",
+        )))
     return str(content)
 
 
@@ -680,7 +732,7 @@ def _summary_text(value: object, limit: int = 180) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-def format_item_plans(plans: list[object]) -> str:
+def format_item_plans(plans: Sequence[object]) -> str:
     """Render holder/plan/slot structure without assigning recommendation rank."""
     grouped: dict[str, dict[int, list[tuple[int, str]]]] = {}
     for value in plans:
