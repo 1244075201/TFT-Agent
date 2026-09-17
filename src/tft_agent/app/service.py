@@ -50,6 +50,7 @@ from tft_agent.app.semantic_retrieval import (
     RetrievalPlannerClient,
     SemanticRetrievalPlan,
     is_semantic_discovery_query,
+    is_state_aware_strategy_query,
 )
 from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
@@ -216,11 +217,13 @@ class AgentService:
             self._strategy_turn_states.pop(scope.session_id, None)
             previous_strategy = None
         potential_strategy_followup = bool(
-            previous_strategy and _is_strategy_followup(request.text)
+            previous_strategy and (_is_strategy_followup(request.text)
+                                   or _is_conditional_followup(request.text))
         )
         retrieval_first = (
             is_strategy_open_query(request.text, product_mode)
             or potential_strategy_followup
+            or bool(re.search(r"选什么|选哪个|怎么选", request.text))
         )
         conversation_reset = scope.session_id in self._general_guide_resets
         self._cancelled_sessions.discard(scope.session_id)
@@ -277,7 +280,17 @@ class AgentService:
                     request.text, {item.entity_type for item in resolution.entities}
                 )
             )
-            retrieval_first = retrieval_first or semantic_discovery
+            state_aware = (
+                not potential_strategy_followup
+                and structured_composition_list_limit(request.text) is None
+                and preliminary_understanding.knowledge_intent not in {
+                    KnowledgeIntent.ENTITY_FACT, KnowledgeIntent.GENERAL_KNOWLEDGE,
+                }
+                and is_state_aware_strategy_query(
+                    request.text, {item.entity_type for item in resolution.entities}
+                )
+            )
+            retrieval_first = retrieval_first or semantic_discovery or state_aware
             strategy_state_inherited = bool(
                 potential_strategy_followup
                 and previous_strategy
@@ -354,6 +367,19 @@ class AgentService:
                 resolution.entities, active_context
             )
             understanding = _apply_champion_strategy_route(understanding, champion_matches)
+            focal_entities = [item for item in resolution.entities
+                              if item.entity_type in {"emblem", "item", "augment"}]
+            if not focal_entities:
+                focal_entities = _descriptive_condition_entities(request.text, active_context)
+            initial_conditional = bool(
+                not strategy_state_inherited
+                and any(item.entity_type in {"champion", "composition"}
+                        for item in resolution.entities)
+                and focal_entities
+                and re.search(r"没有|没|无|不带|有.+没", request.text)
+                and re.search(r"能玩|可以玩|能用|可用|怎么|如何|要不要", request.text)
+            )
+            retrieval_first = retrieval_first or initial_conditional
             inherited_candidates: list[ResolvedEntity] = []
             if strategy_state_inherited and previous_strategy:
                 inherited_candidates = _select_followup_candidates(
@@ -403,11 +429,16 @@ class AgentService:
             state = apply_state_mutation(state, understanding, request.text)
             entity_end = perf_counter()
             planner_outcome: PlannerOutcome | None = None
-            if semantic_discovery:
+            if semantic_discovery or state_aware:
                 planner = RetrievalPlannerClient(self.settings)
                 try:
-                    planner_outcome = await planner.plan(
-                        request.text, state if scope.uses_game_state else None
+                    planner_outcome = (
+                        await planner.plan(
+                            request.text, state if scope.uses_game_state else None,
+                            state_aware=True,
+                        ) if state_aware else await planner.plan(
+                            request.text, state if scope.uses_game_state else None,
+                        )
                     )
                 finally:
                     await planner.close()
@@ -420,7 +451,29 @@ class AgentService:
             retrieval_queries: list[str] = []
             structured_seeds: list[dict[str, str]] = []
             structured_metadata: dict[str, Any] = {}
-            if strategy_state_inherited and previous_strategy:
+            conditional_followup = bool(
+                strategy_state_inherited and previous_strategy
+                and previous_strategy.target_entities
+                and previous_strategy.focal_conditions
+                and _is_conditional_followup(request.text)
+            )
+            scenario_evidence: dict[str, list[str]] = {}
+            conditional_state: StrategyTurnState | None = None
+            if conditional_followup and previous_strategy:
+                knowledge, calls, structured_metadata, scenario_evidence = (
+                    await self._retrieve_conditional(previous_strategy, plan)
+                )
+                retrieval_queries = [request.text, previous_strategy.raw_query]
+            elif initial_conditional:
+                conditional_state = _initial_conditional_state(
+                    request.text, product_mode, active_context,
+                    resolution.entities, focal_entities, champion_matches, understanding,
+                )
+                knowledge, calls, structured_metadata, scenario_evidence = (
+                    await self._retrieve_conditional(conditional_state, plan)
+                )
+                retrieval_queries = [request.text]
+            elif strategy_state_inherited and previous_strategy:
                 retrieval_queries = [
                     request.text,
                     previous_strategy.raw_query,
@@ -432,6 +485,11 @@ class AgentService:
                         _candidate_trace_record(item) for item in inherited_candidates
                     ]
                 }
+            elif state_aware and planner_outcome is not None:
+                retrieval_queries = list(planner_outcome.plan.strategy_searches)
+                knowledge, calls, structured_metadata = await self._retrieve_state_aware(
+                    planner_outcome.plan, plan
+                )
             elif semantic_discovery and planner_outcome is not None:
                 retrieval_queries = [
                     *planner_outcome.plan.strategy_searches,
@@ -474,6 +532,22 @@ class AgentService:
                 retrieval_interpretation=(
                     planner_outcome.plan.user_goal if planner_outcome else None
                 ),
+                observed_state=(planner_outcome.plan.observed_state
+                                if planner_outcome else []),
+                decision_questions=(planner_outcome.plan.decision_questions
+                                    if planner_outcome else []),
+                focal_conditions=[item.display_name for item in focal_entities]
+                if initial_conditional else (
+                    [item.display_name for item in previous_strategy.focal_conditions]
+                    if conditional_followup and previous_strategy else []),
+                target_entities=([item.display_name for item in resolution.entities
+                                  if item.entity_type in {"champion", "composition"}]
+                                 if initial_conditional else
+                                 [item.display_name for item in previous_strategy.target_entities]
+                                 if conditional_followup and previous_strategy else []),
+                scenario_evidence=scenario_evidence,
+                evidence_strength={item.evidence_id: _evidence_strength(item)
+                                   for item in knowledge.evidence},
             )
             context_summary = context.readable_summary()
             context_end = perf_counter()
@@ -514,7 +588,10 @@ class AgentService:
                 inherited_candidate_ids=[
                     item.canonical_id for item in inherited_candidates
                 ],
-                route=("semantic_discovery" if semantic_discovery else
+                route=("state_aware_strategy" if state_aware else
+                       "semantic_discovery" if semantic_discovery else
+                       "conditional_followup" if conditional_followup else
+                       "conditional_strategy" if initial_conditional else
                        "strategy_followup" if strategy_state_inherited else
                        "explicit_strategy" if retrieval_first else
                        "deterministic_fact"
@@ -549,6 +626,29 @@ class AgentService:
                     structured_metadata.get("candidate_comps", [])
                     if isinstance(item, dict) and item.get("name")
                 ],
+                query_type=(planner_outcome.plan.query_type.value if planner_outcome else
+                            "conditional_followup" if conditional_followup else
+                            "conditional_strategy" if initial_conditional else None),
+                observed_state=context.observed_state,
+                decision_questions=context.decision_questions,
+                target_entities=(
+                    [item.display_name for item in previous_strategy.target_entities]
+                    if conditional_followup and previous_strategy else
+                    [item.display_name for item in resolution.entities
+                     if item.entity_type in {"champion", "composition"}]
+                ),
+                focal_conditions=(
+                    [item.display_name for item in previous_strategy.focal_conditions]
+                    if conditional_followup and previous_strategy else
+                    [item.display_name for item in focal_entities]
+                ),
+                scenario_evidence=scenario_evidence,
+                evidence_strength=context.evidence_strength,
+                candidate_inclusion_reasons={
+                    str(item.get("name")): [str(value) for value in item.get("signals", [])]
+                    for item in structured_metadata.get("candidate_comps", [])
+                    if isinstance(item, dict) and item.get("name")
+                },
                 stage_latency_ms={
                     "entity_resolution": (entity_end - entity_start) * 1000,
                     "planning": (plan_end - entity_end) * 1000,
@@ -566,7 +666,7 @@ class AgentService:
             payload = trace.model_dump(mode="json")
             yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
                             context_gaps=[*gaps, *knowledge.knowledge_gaps])
-            if not retrieval_first and (
+            if not retrieval_first and not initial_conditional and (
                 understanding.kind == QueryKind.DETERMINISTIC_LOOKUP
                 or understanding.resolution_category
                 == ResolutionCategory.RESOLVED_ENTITY_NO_KNOWLEDGE
@@ -597,13 +697,19 @@ class AgentService:
             trace.grounding_passed = not grounding.violations
             trace.grounding_violations = grounding.violations
             trace.grounding_fallback_used = grounding.used_fallback
+            trace.final_recommendation_strength = (
+                "evidence_bound_fallback" if grounding.used_fallback else
+                "conditional" if conditional_followup or state_aware else
+                "qualitative"
+            )
             trace.stage_latency_ms["llm"] = (perf_counter() - llm_started) * 1000
             trace.stage_latency_ms["answer"] = trace.stage_latency_ms["llm"]
             trace.stage_latency_ms["total"] = (perf_counter() - started) * 1000
             self.last_trace = trace
             await self._record_answer(request, outcome.response, scope.session_id)
-            if retrieval_first and not strategy_state_inherited:
-                turn_state = _strategy_turn_state_from_trace(trace, active_context)
+            if (retrieval_first or initial_conditional) and not strategy_state_inherited:
+                turn_state = (conditional_state if initial_conditional else
+                              _strategy_turn_state_from_trace(trace, active_context))
                 if turn_state is not None:
                     self._strategy_turn_states[scope.session_id] = turn_state
             yield ChatEvent(type="answer", message=outcome.response.recommendation,
@@ -771,6 +877,141 @@ class AgentService:
                 for item in evidence
             )},
         )
+
+    async def _retrieve_state_aware(
+        self, semantic: SemanticRetrievalPlan, plan: RetrievalPlan,
+    ) -> tuple[RetrievedKnowledge, list[RepositoryCall], dict[str, Any]]:
+        """Search existing strategy prose for a state decision, without comp ranking."""
+        started = perf_counter()
+        search_terms = _concept_search_terms(semantic.strategy_searches)
+        rows = await self._repo().search_normalized_knowledge(
+            plan.active_snapshot_id, plan.game_patch,
+            search_terms, limit=80,
+        )
+        all_sections = {"starting_conditions", "core", "early_game", "mid_game",
+                        "late_game", "tip"}
+        requested = {"tip" if field == "tips" else field
+                     for field in semantic.requested_fields}
+        sections = requested & all_sections or all_sections
+        matches = [row for row in rows if isinstance(row, dict)
+                   and row.get("section") in sections and row.get("comp_id")]
+        broadened = False
+        if not matches:
+            matches = [row for row in rows if isinstance(row, dict)
+                       and row.get("section") in all_sections and row.get("comp_id")]
+            broadened = bool(matches)
+        probes = [term for term in search_terms if 2 <= len(term) <= 3]
+        ranked = sorted(
+            matches,
+            key=lambda row: (
+                sum(probe in _normalized(str(row.get("semantic_content") or ""))
+                    for probe in probes),
+                row.get("section") in {"mid_game", "late_game", "starting_conditions"},
+            ),
+            reverse=True,
+        )[:16]
+        evidence = [EvidenceRecord(requested_patch=plan.game_patch, **row)
+                    for row in ranked]
+        gaps = [] if evidence else [
+            "planner concepts found no matching active-snapshot strategy prose; "
+            "this does not prove the database lacks related advice"
+        ]
+        if broadened:
+            gaps.append("planner requested sections missed related strategy prose; "
+                        "executor broadened only to existing strategy sections")
+        call = RepositoryCall(
+            operation="search_state_strategy_text",
+            filters={"snapshot_id": plan.active_snapshot_id,
+                     "game_patch": plan.game_patch,
+                     "concepts": semantic.strategy_searches,
+                     "lexical_terms": search_terms,
+                     "sections": sorted(sections), "broadened_sections": broadened},
+            result_count=len(evidence), latency_ms=(perf_counter() - started) * 1000,
+        )
+        return RetrievedKnowledge(evidence=evidence, knowledge_gaps=gaps), [call], {
+            "text_hits": len(evidence), "candidate_comps": [],
+        }
+
+    async def _retrieve_conditional(
+        self, previous: StrategyTurnState, plan: RetrievalPlan,
+    ) -> tuple[RetrievedKnowledge, list[RepositoryCall], dict[str, Any],
+               dict[str, list[str]]]:
+        """Re-query both polarities inside the persisted target scope only."""
+        started = perf_counter()
+        target_ids = {item.canonical_id for item in previous.candidate_compositions}
+        if previous.primary_composition:
+            target_ids.add(previous.primary_composition.canonical_id)
+        condition = previous.focal_conditions[0]
+        variants = list(dict.fromkeys((condition.display_name, condition.matched_alias)))
+        present_queries = variants
+        absent_queries = [f"没有{value}" for value in variants]
+        absent_queries.extend(f"无{value}" for value in variants)
+        present_rows, absent_rows, relation = await asyncio.gather(
+            self._repo().search_normalized_knowledge(
+                plan.active_snapshot_id, plan.game_patch, present_queries, limit=40,
+            ),
+            self._repo().search_normalized_knowledge(
+                plan.active_snapshot_id, plan.game_patch, absent_queries, limit=40,
+            ),
+            self._repo().expand_normalized_relations(
+                plan.active_snapshot_id, plan.game_patch,
+                _structured_seed_records([condition]), candidate_limit=50,
+            ),
+        )
+        def scoped(rows: list[dict[str, object]]) -> list[EvidenceRecord]:
+            return [EvidenceRecord(requested_patch=plan.game_patch, **row)
+                    for row in rows if isinstance(row, dict)
+                    and str(row.get("comp_id") or "") in target_ids]
+        present = scoped(present_rows)
+        absent = scoped(absent_rows)
+        relation_rows = relation.get("evidence", [])
+        if isinstance(relation_rows, list):
+            present.extend(scoped([row for row in relation_rows
+                                   if isinstance(row, dict)
+                                   and row.get("section") == "structured_relation"]))
+        expansion_calls: list[RepositoryCall] = []
+        present_comp_ids = list(dict.fromkeys(
+            item.comp_id for item in present if item.comp_id
+        ))[:4]
+        detail_plan = plan.model_copy(update={
+            "knowledge_needs": ["composition_roster", "item_plan", "starting_conditions",
+                                "core", "early_game", "mid_game", "late_game", "tip"],
+            "target_champion": next((item for item in previous.target_entities
+                                     if item.entity_type == "champion"), None),
+        })
+        for comp_id in present_comp_ids:
+            comp = await self._repo().find_comp_by_id(comp_id, plan.game_patch)
+            if comp is None:
+                continue
+            details, detail_calls = await self._normalized_comp_evidence(comp, detail_plan)
+            present.extend(details)
+            expansion_calls.extend(detail_calls)
+        unique = {item.evidence_id: item for item in [*present, *absent]}
+        scenarios = {
+            "present": [item.evidence_id for item in present],
+            "absent": [item.evidence_id for item in absent],
+        }
+        gaps = []
+        if not present:
+            gaps.append(f"no direct within-target evidence for {condition.display_name} present")
+        if not absent:
+            gaps.append(f"no direct within-target evidence for {condition.display_name} absent; "
+                        "absence of requirement does not prove viability")
+        calls = [RepositoryCall(
+            operation="search_conditional_scenarios",
+            filters={"snapshot_id": plan.active_snapshot_id,
+                     "target_comp_ids": sorted(target_ids),
+                     "condition_id": condition.canonical_id,
+                     "present_queries": present_queries,
+                     "absent_queries": absent_queries,
+                     "relation_expansion": condition.entity_type},
+            result_count=len(unique), latency_ms=(perf_counter() - started) * 1000,
+        ), *expansion_calls]
+        return (RetrievedKnowledge(evidence=list(unique.values()), knowledge_gaps=gaps),
+                calls, {"candidate_comps": [
+                    _candidate_trace_record(item)
+                    for item in previous.candidate_compositions
+                ]}, scenarios)
 
     async def _conversation_subject(
         self, rows: list[tuple[str, str]], context: ActivePatchContext
@@ -1162,6 +1403,15 @@ def _is_strategy_followup(text: str) -> bool:
     ))
 
 
+def _is_conditional_followup(text: str) -> bool:
+    """Structural contrast over a previously grounded condition, not an entity rule."""
+    normalized = _normalized(text)
+    return bool(re.search(
+        r"有和没有|有.*没|没.*有|两种情况|分别|如果没有|如果有|有转和没转",
+        normalized,
+    ))
+
+
 def _is_candidate_comparison(text: str) -> bool:
     return bool(re.search(r"这几个|这些|它们|区别|比较|哪个", text))
 
@@ -1225,6 +1475,10 @@ def _strategy_turn_state_from_trace(
     values = list(candidates.values())
     seeds = [item for item in trace.understanding.resolved_entities
              if item.entity_type != "composition"]
+    targets = [item for item in trace.understanding.resolved_entities
+               if item.entity_type in {"champion", "composition"}]
+    conditions = [item for item in trace.understanding.resolved_entities
+                  if item.entity_type in {"emblem", "item", "augment"}]
     return StrategyTurnState(
         workspace=trace.workspace or trace.understanding.product_mode,
         patch=context.game_patch,
@@ -1232,7 +1486,97 @@ def _strategy_turn_state_from_trace(
         primary_composition=trace.understanding.target_comp or values[0],
         candidate_compositions=values,
         retrieval_seeds=seeds,
+        target_entities=targets,
+        focal_conditions=conditions,
+        condition_polarity=("absent" if conditions and
+                            re.search(r"没有|没|无|不带", trace.original_query)
+                            else "present" if conditions else None),
+        comparison_dimension=(conditions[0].entity_type if conditions else None),
     )
+
+
+def _initial_conditional_state(
+    query: str,
+    workspace: ProductMode,
+    context: ActivePatchContext,
+    entities: list[ResolvedEntity],
+    focal_entities: list[ResolvedEntity],
+    matches: list[ChampionCompositionMatch],
+    understanding: QueryStateUnderstanding,
+) -> StrategyTurnState:
+    targets = [item for item in entities
+               if item.entity_type in {"champion", "composition"}]
+    conditions = focal_entities
+    candidates = list(dict.fromkeys(
+        match.composition.canonical_id for match in matches if match.confidence == "high"
+    ))
+    by_id = {match.composition.canonical_id: match.composition for match in matches}
+    selected = [by_id[comp_id] for comp_id in candidates]
+    if understanding.target_comp and all(
+        item.canonical_id != understanding.target_comp.canonical_id for item in selected
+    ):
+        selected.insert(0, understanding.target_comp)
+    return StrategyTurnState(
+        workspace=workspace, patch=context.game_patch, raw_query=query,
+        primary_composition=understanding.target_comp or (selected[0] if selected else None),
+        candidate_compositions=selected,
+        retrieval_seeds=[item for item in entities if item.entity_type != "composition"],
+        target_entities=targets, focal_conditions=conditions,
+        condition_polarity=("absent" if re.search(r"没有|没|无|不带", query)
+                            else "present"),
+        comparison_dimension=conditions[0].entity_type if conditions else None,
+    )
+
+
+def _descriptive_condition_entities(
+    query: str, context: ActivePatchContext,
+) -> list[ResolvedEntity]:
+    """Keep an explicitly contrasted but non-canonical condition as retrieval text."""
+    match = re.search(r"有(?P<condition>[^，,。？?]{2,16}?)和没有", query)
+    if not match:
+        return []
+    phrase = match.group("condition").strip()
+    if not phrase:
+        return []
+    return [ResolvedEntity(
+        canonical_id="descriptive:" + _normalized(phrase),
+        entity_type="condition_concept", display_name=phrase,
+        game_patch=context.game_patch, set_number=context.set_number,
+        set_name=context.set_name, matched_alias=phrase,
+        match_kind="descriptive_condition", match_score=1.0,
+    )]
+
+
+def _evidence_strength(item: EvidenceRecord) -> str:
+    """Classify what a retrieved item can establish, not its retrieval rank."""
+    if item.section == "candidate_composition":
+        return "CANDIDATE_RELATION"
+    if item.section in {"structured_relation", "item_plan", "augment", "emblem"}:
+        return "STRUCTURED_ASSOCIATION"
+    content = str(item.semantic_content)
+    if re.search(r"必须|必备|需要|前提|才可|才能", content):
+        return "DIRECT_REQUIREMENT"
+    if re.search(r"推荐|优先|建议", content):
+        return "DIRECT_RECOMMENDATION"
+    if item.section in {"starting_conditions", "core", "early_game", "mid_game",
+                        "late_game", "tip"}:
+        return "QUALITATIVE_STRATEGY"
+    return "STRUCTURED_ASSOCIATION"
+
+
+def _concept_search_terms(concepts: list[str]) -> list[str]:
+    """Break planner concepts into short lexical probes without query-specific rules."""
+    terms = list(concepts)
+    for concept in concepts:
+        for token in re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9]+", concept):
+            if len(token) <= 4 or re.fullmatch(r"[A-Za-z0-9]+", token):
+                terms.append(token)
+            else:
+                terms.extend(token[index:index + 2]
+                             for index in range(len(token) - 1))
+                terms.extend(token[index:index + 3]
+                             for index in range(len(token) - 2))
+    return list(dict.fromkeys(terms))[:80]
 
 
 def _broad_retrieval_queries(

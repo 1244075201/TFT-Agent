@@ -68,6 +68,10 @@ class StrategyTurnState(StrictModel):
     primary_composition: ResolvedEntity | None = None
     candidate_compositions: list[ResolvedEntity] = Field(default_factory=list)
     retrieval_seeds: list[ResolvedEntity] = Field(default_factory=list)
+    target_entities: list[ResolvedEntity] = Field(default_factory=list)
+    focal_conditions: list[ResolvedEntity] = Field(default_factory=list)
+    condition_polarity: str | None = None
+    comparison_dimension: str | None = None
 
 
 class ChampionCompositionMatch(StrictModel):
@@ -196,6 +200,15 @@ class RetrievalTrace(StrictModel):
     grounding_passed: bool = True
     grounding_violations: list[str] = Field(default_factory=list)
     grounding_fallback_used: bool = False
+    query_type: str | None = None
+    observed_state: list[str] = Field(default_factory=list)
+    decision_questions: list[str] = Field(default_factory=list)
+    target_entities: list[str] = Field(default_factory=list)
+    focal_conditions: list[str] = Field(default_factory=list)
+    scenario_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    evidence_strength: dict[str, str] = Field(default_factory=dict)
+    candidate_inclusion_reasons: dict[str, list[str]] = Field(default_factory=dict)
+    final_recommendation_strength: str | None = None
 
 
 class AnswerContext(StrictModel):
@@ -211,6 +224,12 @@ class AnswerContext(StrictModel):
     previous_topic: str | None = None
     current_candidates: list[ResolvedEntity] = Field(default_factory=list)
     retrieval_interpretation: str | None = None
+    observed_state: list[str] = Field(default_factory=list)
+    decision_questions: list[str] = Field(default_factory=list)
+    focal_conditions: list[str] = Field(default_factory=list)
+    target_entities: list[str] = Field(default_factory=list)
+    scenario_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    evidence_strength: dict[str, str] = Field(default_factory=dict)
 
     def readable_summary(self) -> str:
         facts = _user_facts(self.game_state)
@@ -231,6 +250,36 @@ class AnswerContext(StrictModel):
                 blocks.append(
                     "RETRIEVAL INTERPRETATION\n" + self.retrieval_interpretation
                 )
+            if self.observed_state:
+                blocks.append("OBSERVED STATE (user-reported, not verified)\n- "
+                              + "\n- ".join(self.observed_state))
+            if self.decision_questions:
+                blocks.append("DECISION QUESTIONS\n- "
+                              + "\n- ".join(self.decision_questions))
+            if self.scenario_evidence:
+                if self.target_entities:
+                    blocks.append("FIXED TARGET ENTITIES\n- "
+                                  + "\n- ".join(self.target_entities))
+                if self.focal_conditions:
+                    blocks.append("FOCAL CONDITIONS\n- "
+                                  + "\n- ".join(self.focal_conditions))
+                by_id = {item.evidence_id: item for item in self.evidence}
+                blocks.append("CONDITIONAL SCENARIOS (absence is unknown)\n"
+                              + "\n".join(
+                                  f"- {key}: " + (", ".join(
+                                      f"{by_id[value].display_name} · {by_id[value].section}"
+                                      for value in ids if value in by_id
+                                  ) or "none")
+                                  for key, ids in self.scenario_evidence.items()
+                              ))
+            if self.evidence_strength:
+                blocks.append("EVIDENCE STRENGTH\n"
+                              + "\n".join(
+                                  f"- {item.display_name} · {item.section}: "
+                                  f"{self.evidence_strength[item.evidence_id]}"
+                                  for item in self.evidence
+                                  if item.evidence_id in self.evidence_strength
+                              ))
             if self.current_candidates:
                 blocks.append(
                     "CURRENT CANDIDATES "

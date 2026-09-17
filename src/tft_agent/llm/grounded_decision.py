@@ -58,6 +58,11 @@ class GroundedDecisionClient:
                     "CANDIDATE COMPOSITION与STRUCTURED RELATION只是由阵容名单、棋子羁绊、"
                     "装备持有者或强化association反查出的候选；其出现顺序和relation数量只"
                     "表示检索相关性，不代表阵容强度、胜率或最佳选择。"
+                    "证据强度必须逐级校准：association只说明有关联，candidate只说明候选，"
+                    "不能升级为明确推荐或可玩性保证；没有找到X为硬性前提，不等于证明无X可玩。"
+                    "没有直接优先级、比较文本或统计证据，不得给多选一排序。"
+                    "对有/无条件的对照问题必须分别按CONDITIONAL SCENARIOS取证；某场景无"
+                    "evidence IDs时明确说未知，不能从另一场景反推。"
                     "若存在PREVIOUS TOPIC和CURRENT CANDIDATES，当前问句中的‘第二个’、"
                     "‘其他路线’、‘这几个’已由程序确定性解析为这些阵容；必须按该阵容"
                     "范围回答，不得重新解释成装备槽位、棋子顺序或其他序号。"
@@ -91,6 +96,19 @@ def normalize_decision_output(content: str, context: AnswerContext) -> DecisionO
     """Normalize JSON, fenced JSON, partial JSON, or useful plain text locally."""
     data = _extract_object(content)
     if data is None:
+        if content.lstrip().startswith("{"):
+            match = re.search(r'"(?:recommendation|summary|answer)"\s*:\s*', content)
+            if match:
+                try:
+                    value, _ = json.JSONDecoder().raw_decode(content[match.end():])
+                except json.JSONDecodeError:
+                    value = None
+                if isinstance(value, str) and value.strip():
+                    return DecisionOutcome(FinalResponse(recommendation=value.strip()), [])
+            return DecisionOutcome(FinalResponse(
+                recommendation="当前版本检索到了策略资料，但回答格式无效；"
+                               "无法可靠提取有证据支持的结论。"
+            ), [])
         return DecisionOutcome(FinalResponse(recommendation=content.strip()), [])
     summary = _first_text(data, "recommendation", "summary", "answer", "建议")
     if not summary:
@@ -125,8 +143,25 @@ def enforce_closed_world_grounding(
         evidence_text,
         json.dumps(context.game_state.model_dump(mode="json"), ensure_ascii=False),
         " ".join(item.display_name for item in context.current_candidates),
+        " ".join(context.target_entities),
+        " ".join(context.focal_conditions),
+        context.previous_topic or "",
     ))
     violations: list[str] = []
+    if not context.evidence and context.understanding.kind.value == "strategy_decision":
+        violations.append("no current-patch evidence for strategy claims")
+    if context.scenario_evidence and not context.scenario_evidence.get("absent"):
+        violations.append("absent scenario lacks independent construction evidence")
+    if context.scenario_evidence and not context.scenario_evidence.get("absent"):
+        if re.search(r"(?:没有|无|不带|没)(?:[^。；，\n]{0,32})"
+                     r"(?:也|仍|照样)?(?:能玩|可以玩|可玩|能用|成立|没问题)", answer_text):
+            violations.append("unsupported absent-condition viability")
+    choice_question = bool(re.search(r"选什么|选哪个|怎么选|优先哪个", context.question))
+    if choice_question and not any(
+        value in {"DIRECT_RECOMMENDATION", "DIRECT_REQUIREMENT"}
+        for value in context.evidence_strength.values()
+    ):
+        violations.append("association-only alternatives cannot establish a ranking")
     seen_entities: set[str] = set()
     for row in catalog:
         names = [str(row.get("display_name") or "")]
@@ -138,6 +173,7 @@ def enforce_closed_world_grounding(
             if (
                 len(normalized) < 2
                 or normalized in seen_entities
+                or (row.get("entity_type") == "item" and len(normalized) <= 2)
                 or re.fullmatch(r"(?:\d+星)?\d+费(?:弈子|卡|单位)?", normalized)
             ):
                 continue
@@ -178,7 +214,55 @@ def enforce_closed_world_grounding(
     candidates = list(dict.fromkeys(
         item.display_name for item in context.evidence if item.entity_type == "composition"
     ))
-    if candidates:
+    if context.scenario_evidence and context.focal_conditions:
+        condition = context.focal_conditions[0]
+        target = "、".join(context.target_entities) or "当前目标"
+        present_ids = set(context.scenario_evidence.get("present", []))
+        descriptions = list(dict.fromkeys(
+            str(item.semantic_content).strip()
+            for item in context.evidence
+            if item.evidence_id in present_ids
+            and item.section in {"starting_conditions", "core", "early_game",
+                                 "mid_game", "late_game", "tip"}
+            and isinstance(item.semantic_content, str)
+        ))
+        rosters = [item for item in context.evidence
+                   if item.evidence_id in present_ids
+                   and item.section == "composition_roster"
+                   and isinstance(item.semantic_content, dict)]
+        board_lines = []
+        for item in rosters[:2]:
+            semantic = item.semantic_content
+            units = semantic.get("units") if isinstance(semantic, dict) else None
+            names = [str(row.get("champion")) for row in units
+                     if isinstance(row, dict) and row.get("champion")] \
+                if isinstance(units, list) else []
+            if names:
+                board_lines.append(f"{item.display_name}最终棋子：" + "、".join(names[:10]))
+        recommendation = (
+            f"针对{target}与{condition}，当前 {context.retrieval_plan.game_patch} 证据中"
+            + ("有条件场景检索到相关攻略描述；" if context.scenario_evidence.get("present")
+               else "有条件场景也未找到直接攻略；")
+            + ("无条件场景检索到相关描述，但需按原文判断适用性。"
+               if context.scenario_evidence.get("absent") else
+               "无条件场景没有独立构筑证据，不能确认同样可玩。")
+            + (("有条件场景原文摘录：" + "；".join(value[:160]
+                                                for value in descriptions[:2]))
+               if descriptions else "")
+            + (("；" + "；".join(board_lines)) if board_lines else "")
+        )
+    elif choice_question and context.evidence:
+        associations = [item for item in context.evidence
+                        if item.section in {"structured_relation", "augment",
+                                            "candidate_composition"}]
+        recommendation = (
+            f"当前 {context.retrieval_plan.game_patch} 证据只确认"
+            + ("、".join(dict.fromkeys(item.display_name for item in associations[:3]))
+               if associations else "部分选项")
+            + "存在关联；对其他选项缺少可比较的直接推荐或优先级证据，"
+              "不足以可靠地排出多选一顺序。"
+        )
+    elif candidates:
         recommendation = (
             f"当前 {context.retrieval_plan.game_patch} 检索证据只支持定性考虑："
             + "、".join(candidates[:context.retrieval_plan.composition_limit])

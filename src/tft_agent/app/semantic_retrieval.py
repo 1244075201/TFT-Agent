@@ -32,6 +32,7 @@ class CostQuantifier(StrEnum):
 
 class DiscoveryQueryType(StrEnum):
     COMPOSITION_DISCOVERY = "composition_discovery"
+    STATE_AWARE_STRATEGY = "state_aware_strategy"
 
 
 class CompositionFilters(StrictModel):
@@ -46,6 +47,8 @@ class SemanticRetrievalPlan(StrictModel):
 
     user_goal: str = Field(min_length=1, max_length=240)
     query_type: DiscoveryQueryType = DiscoveryQueryType.COMPOSITION_DISCOVERY
+    observed_state: list[str] = Field(default_factory=list, max_length=8)
+    decision_questions: list[str] = Field(default_factory=list, max_length=8)
     capabilities: list[RetrievalCapability] = Field(min_length=1, max_length=9)
     composition_filters: CompositionFilters = Field(default_factory=CompositionFilters)
     strategy_searches: list[str] = Field(default_factory=list, max_length=12)
@@ -82,6 +85,20 @@ def is_semantic_discovery_query(text: str, resolved_entity_types: set[str]) -> b
     return asks_for_candidates or describes_preference
 
 
+def is_state_aware_strategy_query(text: str, resolved_entity_types: set[str]) -> bool:
+    """A decision about a described state, not a request to discover compositions."""
+    if resolved_entity_types:
+        return False
+    normalized = re.sub(r"\s+", "", text.casefold())
+    if is_semantic_discovery_query(text, resolved_entity_types):
+        return False
+    open_decision = re.search(r"怎么(?!玩|构筑|出装|运营)|如何应对", normalized)
+    if open_decision:
+        return open_decision.start() >= 3
+    binary_decision = re.search(r"该不该|要不要", normalized)
+    return bool(binary_decision and re.search(r"如果|但|又|没|不够|不足", normalized))
+
+
 def validate_plan_payload(payload: dict[str, Any]) -> SemanticRetrievalPlan:
     """Strictly validate the capability vocabulary and bounded filter values."""
     plan = SemanticRetrievalPlan.model_validate(payload)
@@ -92,6 +109,18 @@ def validate_plan_payload(payload: dict[str, Any]) -> SemanticRetrievalPlan:
     high = plan.composition_filters.main_unit_cost_max
     if low is not None and high is not None and low > high:
         raise ValueError("main unit cost minimum exceeds maximum")
+    if plan.query_type == DiscoveryQueryType.STATE_AWARE_STRATEGY and not (
+        plan.observed_state and plan.decision_questions and plan.strategy_searches
+    ):
+        raise ValueError("state-aware strategy requires state, decisions and search concepts")
+    if plan.query_type == DiscoveryQueryType.STATE_AWARE_STRATEGY and plan.strategy_exclusions:
+        # State negations are decision constraints, not composition exclusion filters.
+        plan = plan.model_copy(update={
+            "strategy_searches": list(dict.fromkeys([
+                *plan.strategy_searches, *plan.strategy_exclusions,
+            ])),
+            "strategy_exclusions": [],
+        })
     declared = set(plan.capabilities)
     strategy_fields = {
         "starting_conditions", "core", "early_game", "mid_game", "late_game", "tips",
@@ -147,6 +176,18 @@ def safe_fallback_plan() -> SemanticRetrievalPlan:
     )
 
 
+def safe_state_aware_fallback_plan(query: str) -> SemanticRetrievalPlan:
+    return SemanticRetrievalPlan(
+        user_goal="find active-patch strategy evidence for the user's stated decision",
+        query_type=DiscoveryQueryType.STATE_AWARE_STRATEGY,
+        observed_state=[query], decision_questions=[query],
+        capabilities=[RetrievalCapability.SEARCH_STRATEGY_TEXT,
+                      RetrievalCapability.GET_COMPOSITION_STRATEGY],
+        strategy_searches=[query],
+        requested_fields=["starting_conditions", "core", "mid_game", "late_game", "tips"],
+    )
+
+
 class RetrievalPlannerClient:
     """One provider call producing a validated, non-executable retrieval intent."""
 
@@ -159,7 +200,8 @@ class RetrievalPlannerClient:
         self._owns_client = client is None
         self._model = settings.model
 
-    async def plan(self, query: str, game_state: GameState | None = None) -> PlannerOutcome:
+    async def plan(self, query: str, game_state: GameState | None = None,
+                   *, state_aware: bool = False) -> PlannerOutcome:
         started = perf_counter()
         state = (game_state.model_dump(exclude_none=True, exclude_defaults=True)
                  if game_state is not None else {})
@@ -170,6 +212,11 @@ class RetrievalPlannerClient:
                     "你是检索规划器，不回答用户问题。只输出JSON检索意图。只能使用以下capabilities："
                     + ", ".join(item.value for item in RetrievalCapability)
                     + "。不得输出patch、SQL、工具名、repository方法、文件或网络操作。"
+                    "如果用户描述现有局面并问下一步，query_type=state_aware_strategy；"
+                    "observed_state只记用户明确说出的状态，decision_questions列出要判断的分支。"
+                    "strategy_searches使用短的可检索运营概念，覆盖经济、升级、搜牌、"
+                    "保血、阶段和条件式攻略；requested_fields优先mid_game、late_game、"
+                    "starting_conditions、core、tips。不要把此类问题改写成阵容推荐。"
                     "低费赌狗需要同时规划低费主核筛选与追三星/慢D/D牌/低等级搜牌等攻略语义，"
                     "并令require_strategy_match=true；低费阵容只筛低费主核，不得自动要求赌牌。"
                     "否定某种玩法时不要把被否定概念设为require_strategy_match；应把该概念的"
@@ -189,7 +236,8 @@ class RetrievalPlannerClient:
                     "limit为1到12。输出字段必须且只能符合schema。"
                     "精确JSON形状如下：{\"user_goal\":\"一句检索目标\","
                     "\"query_type\":\"composition_discovery\",\"capabilities\":["
-                    "\"LIST_COMPOSITIONS\"],\"composition_filters\":{"
+                    "\"LIST_COMPOSITIONS\"],\"observed_state\":[],"
+                    "\"decision_questions\":[],\"composition_filters\":{"
                     "\"main_unit_cost_min\":null,\"main_unit_cost_max\":null,"
                     "\"cost_quantifier\":\"ANY\","
                     "\"require_strategy_match\":false},\"strategy_searches\":[],"
@@ -211,12 +259,15 @@ class RetrievalPlannerClient:
             if not isinstance(decoded, dict):
                 raise ValueError("planner output is not an object")
             plan = validate_plan_payload(decoded)
+            if state_aware and plan.query_type != DiscoveryQueryType.STATE_AWARE_STRATEGY:
+                raise ValueError("planner did not represent the state-aware decision")
             return PlannerOutcome(
                 plan=plan, model=self._model, latency_ms=(perf_counter() - started) * 1000,
             )
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             return PlannerOutcome(
-                plan=safe_fallback_plan(), model=self._model,
+                plan=(safe_state_aware_fallback_plan(query) if state_aware else
+                      safe_fallback_plan()), model=self._model,
                 latency_ms=(perf_counter() - started) * 1000,
                 used_fallback=True, validation_error=str(exc)[:500],
             )
