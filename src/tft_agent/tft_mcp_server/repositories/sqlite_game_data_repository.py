@@ -307,6 +307,18 @@ class SQLiteGameDataRepository:
             phase,
         )
 
+    async def get_comp_presentation_core_units(
+        self, snapshot_id: str, comp_id: str
+    ) -> list[str]:
+        """Return explicit core units, falling back to the representative hero.
+
+        The legacy ``core_units`` column is structured from item-plan holders; it is
+        deliberately distinct from the free-form ``core`` strategy section.
+        """
+        return await asyncio.to_thread(
+            self._get_comp_presentation_core_units_sync, snapshot_id, comp_id
+        )
+
     async def get_comp_item_plans(self, snapshot_id: str, comp_id: str) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
             self._read_normalized_rows_sync,
@@ -1265,6 +1277,37 @@ class SQLiteGameDataRepository:
         sql += " ORDER BY rowid"
         with self._connect() as connection:
             return [dict(row) for row in connection.execute(sql, params).fetchall()]
+
+    def _get_comp_presentation_core_units_sync(
+        self, snapshot_id: str, comp_id: str
+    ) -> list[str]:
+        with self._connect() as connection:
+            explicit = connection.execute(
+                "SELECT display_name FROM datatft_comp_board_units "
+                "WHERE snapshot_id=? AND comp_id=? AND board_phase='FINAL' AND is_main=1 "
+                "AND display_name IS NOT NULL AND trim(display_name)<>'' ORDER BY board_index",
+                (snapshot_id, comp_id),
+            ).fetchall()
+            names = [str(row[0]).strip() for row in explicit]
+            if names:
+                return list(dict.fromkeys(names))
+
+            legacy = connection.execute(
+                "SELECT core_units FROM datatft_comps WHERE snapshot_id=? AND comp_id=?",
+                (snapshot_id, comp_id),
+            ).fetchone()
+            if legacy is not None:
+                names = _json_text_values(legacy[0])
+                if names:
+                    return list(dict.fromkeys(names))
+
+            representative = connection.execute(
+                "SELECT representative_display_name FROM datatft_comp_metadata "
+                "WHERE snapshot_id=? AND comp_id=?",
+                (snapshot_id, comp_id),
+            ).fetchone()
+            display_name = str(representative[0] or "").strip() if representative else ""
+            return [display_name] if display_name else []
 
     def _get_comp_items_sync(
         self, snapshot_id: str, comp_id: str, category: str | None

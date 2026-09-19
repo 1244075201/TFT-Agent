@@ -191,13 +191,19 @@ class AgentService:
         """Return current-patch composition summaries without repository internals."""
         context = await self._context()
         records = await self._repo().search_comps(None, context.game_patch, limit=limit)
+        core_units = await asyncio.gather(*(
+            self._repo().get_comp_presentation_core_units(
+                context.active_snapshot_id, record.comp_id
+            )
+            for record in records
+        ))
         return [CompositionCard(
             canonical_id=record.comp_id,
             display_name=record.name,
             tier=record.tier,
-            core_units=record.core_units,
+            core_units=display_cores,
             summary=record.level_plan[0] if record.level_plan else None,
-        ) for record in records]
+        ) for record, display_cores in zip(records, core_units, strict=True)]
 
     async def ask(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         active_context = await self._context()

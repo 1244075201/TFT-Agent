@@ -294,6 +294,26 @@ async def test_v2_storage_read_api_and_v1_compatibility(tmp_path: Path) -> None:
     assert len(await repository.get_comp_board_units("v2", "one", "FINAL")) == 1
     assert len(await repository.get_comp_item_plans("v2", "one")) == 4
     assert await repository.get_comp_conditions("v2", "one") == []
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE datatft_comp_metadata SET representative_display_name='代表英雄' "
+            "WHERE snapshot_id='v2' AND comp_id='one'"
+        )
+    assert await repository.get_comp_presentation_core_units("v2", "one") == ["代表英雄"]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE datatft_comps SET core_units='[\"装备主核\", \"前排主核\"]' "
+            "WHERE snapshot_id='v2' AND comp_id='one'"
+        )
+    assert await repository.get_comp_presentation_core_units("v2", "one") == [
+        "装备主核", "前排主核",
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE datatft_comp_board_units SET is_main=1,display_name='明确主核' "
+            "WHERE snapshot_id='v2' AND comp_id='one'"
+        )
+    assert await repository.get_comp_presentation_core_units("v2", "one") == ["明确主核"]
     await repository.resolve_datatft_normalized_entities("v2", "18.2", 18)
     assert len(await repository.get_comp_items("v2", "one")) == 4
     artifact = await repository.get_comp_items_by_category("v2", "one", "ARTIFACT")
