@@ -215,6 +215,35 @@ async def test_resolver_refuses_same_type_ambiguity(
 
 
 @pytest.mark.asyncio
+async def test_composition_canonical_name_outranks_cross_type_alias_generically() -> None:
+    class CollisionCatalog:
+        async def canonical_catalog(
+            self, game_patch: str, set_number: int
+        ) -> list[dict[str, object]]:
+            base: dict[str, object] = {
+                "game_patch": game_patch,
+                "set_number": set_number,
+                "set_name": "Test Set",
+                "source": "test",
+            }
+            return [
+                {**base, "canonical_id": "comp-night", "entity_type": "composition",
+                 "display_name": "夜行者", "aliases": []},
+                {**base, "canonical_id": "champ-shadow", "entity_type": "champion",
+                 "display_name": "暗影英雄", "aliases": ["夜行者"]},
+            ]
+
+    resolver = CanonicalEntityResolver(  # type: ignore[arg-type]
+        CollisionCatalog(),
+        Settings(current_game_patch="18.2", current_set_number=18),
+    )
+    result = await resolver.resolve("夜行者有哪些棋子")
+    assert [(item.entity_type, item.display_name) for item in result.entities] == [
+        ("composition", "夜行者"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_strategy_text_uses_recorded_patch_family_fallback(
     retrieval_settings: Settings
 ) -> None:
@@ -599,3 +628,90 @@ async def test_cross_type_short_name_ambiguity_is_unresolved(
     resolver = CanonicalEntityResolver(repository, retrieval_settings)
     result = await resolver.resolve("世纪和解怎么玩")
     assert not [item for item in result.entities if item.display_name == "世纪和解"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    ["剑圣核心棋子是谁？", "剑圣怎么玩", "剑圣有哪些棋子"],
+)
+async def test_composition_alias_collision_routes_to_exact_composition(
+    retrieval_settings: Settings, monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    events = await _ask_general(service, query, f"composition-collision-{query}")
+    trace = _trace(service)
+
+    assert trace.understanding.target_comp is not None
+    assert trace.understanding.target_comp.display_name == "剑圣"
+    assert {(item.entity_type, item.display_name) for item in trace.resolved_entities} == {
+        ("composition", "剑圣"),
+    }
+    assert trace.subject_inherited is False
+    assert any(
+        item.entity_type == "composition" and item.display_name == "剑圣"
+        for item in trace.retrieved_knowledge.evidence
+    )
+    assert not [event for event in events if event.type == "error"]
+
+
+@pytest.mark.asyncio
+async def test_new_composition_attempt_never_inherits_previous_subject(
+    retrieval_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service_module, "GroundedDecisionClient", _FakeDecisionClient)
+    service = AgentService(retrieval_settings)
+    await _ask_general(service, "拉露恩95核心棋子是谁？", "collision-continuity")
+    events = await _ask_general(service, "剑圣核心棋子是谁？", "collision-continuity")
+    trace = _trace(service)
+
+    assert trace.explicit_entity_attempt == "剑圣"
+    assert trace.subject_inherited is False
+    assert trace.inheritance_blocked_reason == "current_explicit_resolved_entity"
+    assert trace.conversational_subject is not None
+    assert trace.conversational_subject.display_name == "剑圣"
+    assert trace.understanding.target_comp is not None
+    assert trace.understanding.target_comp.display_name == "剑圣"
+    assert all(
+        item.display_name != "拉露恩95" for item in trace.retrieved_knowledge.evidence
+    )
+    answer = next(event.message for event in events if event.type == "answer")
+    assert "拉露恩95" not in answer
+
+
+@pytest.mark.asyncio
+async def test_unresolved_fact_subject_attempt_blocks_previous_composition(
+    retrieval_settings: Settings
+) -> None:
+    service = AgentService(retrieval_settings)
+    await _ask_general(service, "拉露恩95核心棋子是谁？", "unresolved-fact-subject")
+    events = await _ask_general(
+        service, "不存在阵容核心棋子是谁？", "unresolved-fact-subject"
+    )
+    trace = _trace(service)
+
+    assert trace.explicit_entity_attempt == "不存在阵容"
+    assert trace.explicit_unresolved_term == "不存在阵容"
+    assert trace.subject_inherited is False
+    assert trace.inheritance_blocked_reason == "explicit_unresolved_entity_attempt"
+    assert trace.conversational_subject is None
+    assert trace.understanding.target_comp is None
+    answer = next(event.message for event in events if event.type == "answer")
+    assert "拉露恩95" not in answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "composition",
+    ["艾希95", "主宰女警", "德莱文95", "拉露恩95", "希维尔拼多多"],
+)
+async def test_existing_composition_fact_resolution_regression(
+    retrieval_settings: Settings, composition: str
+) -> None:
+    service = AgentService(retrieval_settings)
+    await _ask_general(service, f"{composition}核心棋子是谁？", f"fact-{composition}")
+    trace = _trace(service)
+    assert trace.understanding.target_comp is not None
+    assert trace.understanding.target_comp.display_name == composition
+    assert trace.llm_call_count == 0

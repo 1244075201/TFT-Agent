@@ -467,6 +467,7 @@ def explicit_entity_attempt(text: str) -> str | None:
         r"出什么(?:装备)?|怎么出(?:装)?|攻略|玩法)?$",
         r"^(?P<term>.+?)(?:怎么玩|怎么运营|如何运营|出什么(?:装备)?|怎么出(?:装)?|"
         r"攻略|玩法)$",
+        r"^(?P<term>.+?)(?:核心棋子(?:是谁|有哪些|是什么)?|有哪些棋子|完整阵容|阵容成员)$",
     )
     for pattern in patterns:
         match = re.fullmatch(pattern, stripped)

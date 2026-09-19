@@ -130,6 +130,10 @@ def _unambiguous_spans(
         by_term.setdefault(_normalize(candidate[2]), []).append(candidate)
     augment_context = bool(re.search(r"选哪个|三选一|海克斯|强化", query))
     strategy_context = bool(re.search(r"怎么玩|攻略|玩法|出什么|怎么出|^玩", query))
+    composition_context = bool(re.search(
+        r"核心棋子|有哪些棋子|完整阵容|阵容成员|怎么玩|怎么运营|攻略|玩法",
+        query,
+    ))
     filtered: list[tuple[int, dict[str, object], str, str]] = []
     blocked_terms: list[str] = []
     for term, candidates in by_term.items():
@@ -139,6 +143,23 @@ def _unambiguous_spans(
         elif augment_context and "augment" in kinds:
             filtered.extend(value for value in candidates
                             if value[1]["entity_type"] == "augment")
+        elif composition_context:
+            exact_compositions = [
+                value for value in candidates
+                if value[1]["entity_type"] == "composition" and value[3] == "canonical"
+            ]
+            competing_canonical = [
+                value for value in candidates
+                if value[1]["entity_type"] != "composition" and value[3] == "canonical"
+            ]
+            if len(exact_compositions) == 1 and not competing_canonical:
+                # A current-patch canonical composition title outranks aliases from
+                # other entity types in composition-oriented questions.
+                filtered.extend(exact_compositions)
+            elif strategy_context and kinds <= {"champion", "composition"}:
+                filtered.extend(candidates)
+            else:
+                blocked_terms.append(term)
         elif strategy_context and kinds <= {"champion", "composition"}:
             # Keep both meanings for the planning layer. It can auditably reconcile an
             # exact composition title with a champion alias using structured comp data.
