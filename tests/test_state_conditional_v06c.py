@@ -152,7 +152,8 @@ async def test_state_aware_retrieves_active_strategy_evidence(
     assert trace.retrieved_knowledge.evidence
     assert all(item.snapshot_id == trace.retrieval_plan.active_snapshot_id
                for item in trace.retrieved_knowledge.evidence)
-    assert trace.repository_calls[-1].operation == "search_state_strategy_text"
+    assert any(call.operation == "search_state_strategy_text"
+               for call in trace.repository_calls)
     assert "OBSERVED STATE" in _Answerer.contexts[-1].readable_summary()
 
 
@@ -193,7 +194,7 @@ async def test_conditional_followup_keeps_target_and_separate_scenarios(
     followup = service.last_trace
     assert followup is not None
     assert followup.route == "conditional_followup"
-    assert followup.planner_invoked is False and followup.llm_call_count == 1
+    assert followup.planner_invoked is True and followup.llm_call_count == 2
     assert target in followup.target_entities
     assert condition in followup.focal_conditions
     assert set(followup.scenario_evidence) == {"present", "absent"}
@@ -214,7 +215,7 @@ async def test_association_only_does_not_rank_choices(
     events = await _ask(service, "升级咯 对冲基金 水乳交融 这三个开局选什么", "choices")
     trace = service.last_trace
     assert trace is not None
-    assert trace.llm_call_count == 1
+    assert trace.planner_invoked and trace.llm_call_count == 2
     assert trace.grounding_fallback_used
     assert "优先升级咯" not in events[-1].message
 

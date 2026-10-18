@@ -12,4 +12,6 @@ class ResponseFormatter:
             sections.append("Reasoning:\n- " + "\n- ".join(response.reasoning))
         if response.next_steps:
             sections.append("Next steps:\n- " + "\n- ".join(response.next_steps))
+        if response.sources:
+            sections.append("Sources:\n- " + "\n- ".join(response.sources))
         return "\n\n".join(sections)

@@ -53,10 +53,12 @@ class GuideChatPage(QWidget):
 
     def __init__(self, patch: str, cards: list[CompositionCard]) -> None:
         super().__init__()
-        title = QLabel(f"<h2>攻略问答</h2>查询阵容、装备、强化、转职和一般运营知识　Patch {patch}")
+        self.title = QLabel(
+            f"<h2>攻略问答</h2>查询阵容、装备、强化、转职和一般运营知识　Patch {patch}"
+        )
         self.new_conversation = QPushButton("新对话")
         header = QHBoxLayout()
-        header.addWidget(title, 1)
+        header.addWidget(self.title, 1)
         header.addWidget(self.new_conversation)
         shortcuts = QHBoxLayout()
         for label, question in (
@@ -84,6 +86,18 @@ class GuideChatPage(QWidget):
     def _send_question(self, question: str) -> None:
         self.chat.input.setPlainText(question)
         self.send_requested.emit(question)
+
+    def update_catalog(self, patch: str, cards: list[CompositionCard]) -> None:
+        self.title.setText(
+            f"<h2>攻略问答</h2>查询阵容、装备、强化、转职和一般运营知识　Patch {patch}"
+        )
+        previous = self.browser
+        self.browser = CompositionBrowser(cards)
+        layout = self.layout()
+        if layout is not None:
+            layout.replaceWidget(previous, self.browser)
+        self.browser.question_requested.connect(self._send_question)
+        previous.deleteLater()
 
     def request(self, question: str) -> ChatRequest:
         return guide_request(question)

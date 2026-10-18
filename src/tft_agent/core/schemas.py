@@ -188,6 +188,19 @@ class StrategyRecommendation(StrictModel):
     evidence_refs: list[str] = Field(min_length=1)
 
 
+class EvidenceCitation(StrictModel):
+    evidence_id: str
+    label: str
+    game_patch: str
+    comp_id: str | None = None
+    snapshot_id: str | None = None
+    evidence_kind: str = "author_advice"
+    source_url: str
+    detail_url: str | None = None
+    retrieved_at: str | None = None
+    body: str
+
+
 class FinalResponse(StrictModel):
     """User-facing recommendation produced by the agent."""
 
@@ -198,6 +211,7 @@ class FinalResponse(StrictModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     used_tools: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    citations: list[EvidenceCitation] = Field(default_factory=list)
     strategy_recommendation: StrategyRecommendation | None = None
 
 

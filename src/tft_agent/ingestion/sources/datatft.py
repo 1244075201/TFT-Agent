@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from html import unescape
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -167,6 +167,11 @@ class DataTFTSource:
             detail = response.get("data")
             if not isinstance(detail, dict):
                 raise ValueError(f"DataTFT detail {raw_comp['id']} returned no object")
+            if str(detail.get("id")) != str(raw_comp["id"]):
+                raise ValueError("DataTFT composition detail ID does not match request")
+            if (raw_comp.get("title") and detail.get("title")
+                    and str(raw_comp["title"]).strip() != str(detail["title"]).strip()):
+                raise ValueError("DataTFT composition title changed during retrieval")
             comps.append(self._canonical_live_comp(raw_comp, detail, catalog))
         payload = json.dumps(
             {
@@ -205,6 +210,7 @@ class DataTFTSource:
 
         pending = _javascript_urls(html, VERSION_URL, html=True)
         visited: set[str] = set()
+        found_patch: str | None = None
         while pending and len(visited) < MAX_VERSION_ASSETS:
             script_url = pending.pop(0)
             if script_url in visited:
@@ -227,10 +233,18 @@ class DataTFTSource:
                 logger.info(
                     "Detected DataTFT patch %s from %s at %s", detected, source, script_url
                 )
-                return detected
+                found_patch = found_patch or detected
+                if responses is None:
+                    return found_patch
             for dependency in _javascript_urls(script, script_url):
                 if dependency not in visited and dependency not in pending:
                     pending.append(dependency)
+            if found_patch and responses and any(
+                'currentData:null,key:' in item.body for item in responses
+            ):
+                return found_patch
+        if found_patch:
+            return found_patch
         raise ValueError("DataTFT frontend did not expose a recognizable current patch")
 
     def _fetch_runtime_catalog(
@@ -355,7 +369,16 @@ class DataTFTSource:
             ],
         }
         if catalog is not None:
-            canonical["knowledge_v2"] = canonical_knowledge(summary, detail, catalog)
+            knowledge = canonical_knowledge(summary, detail, catalog)
+            for board in knowledge["boards"].values():
+                units = board["units"]
+                positions = [unit["board_index"] for unit in units]
+                if (len(positions) != len(set(positions))
+                        or any(not isinstance(pos, int) or not 0 <= pos < 28
+                               for pos in positions)
+                        or any(not unit.get("external_hero_id") for unit in units)):
+                    raise ValueError("DataTFT board identity or position failed validation")
+            canonical["knowledge_v2"] = knowledge
         return canonical
 
     def parse(
@@ -489,6 +512,19 @@ def _extract_current_patch(content: str) -> str | None:
 
 
 def _extract_patch_with_source(content: str) -> tuple[str | None, str | None]:
+    # Current frontend gates the first two options on a release timestamp.
+    # Parse only this known shape; never evaluate downloaded JavaScript.
+    scheduled = re.search(
+        r'const (\w+)=\[((?:\{value:"\d+\.\d+[a-z]?"\},?)+)\],'
+        r'([$\w]+)="(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)"', content,
+    )
+    if scheduled and 'Date.now()<' in content and 'return[n,t,...e]' in content:
+        versions = re.findall(r'value:"(\d+\.\d+[a-z]?)"', scheduled.group(2))
+        release = datetime.fromisoformat(scheduled.group(4)).replace(
+            tzinfo=timezone(timedelta(hours=8))
+        )
+        index = 1 if datetime.now(UTC) < release and len(versions) > 1 else 0
+        return versions[index], "js_scheduled_versions"
     structured = re.search(
         r'(?:const|let|var)\s+[^;\r\n]{0,256}?\b\w+="([0-9]+\.[0-9]+[a-z]?)",'
         r'\w+=\[\{value:"\1"\}',

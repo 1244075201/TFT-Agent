@@ -79,8 +79,8 @@ async def test_inferno_emblem_and_ashe_are_resolved_as_separate_entities(
     assert trace.explicit_unresolved_term is None
     assert trace.retrieval_first_strategy is True
     answer = next(event.message for event in events if event.type == "answer")
-    assert answer == "仅按当前证据给出回答。"
-    assert trace.llm_call_count == 1
+    assert "尚未找到当前版本中这套组合的可靠运营攻略" in answer
+    assert trace.planner_invoked and trace.llm_call_count == 2
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_trait_and_emblem_phrases_remain_distinct(
     relation_gap = any("recognized entities lack exact relation" in gap
                        for gap in trace.knowledge_gaps)
     if relation_gap:
-        assert trace.llm_call_count == 0
+        assert trace.planner_invoked and trace.llm_call_count == 2
     assert "无法唯一识别" not in next(
         event.message for event in events if event.type == "answer"
     )

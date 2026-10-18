@@ -22,7 +22,9 @@ async def _run_once(settings: Settings) -> None:
     if not question:
         raise SystemExit("A question is required")
     service = AgentService(settings)
-    async for event in service.ask(ChatRequest(text=question, session_id="cli")):
+    async for event in service.ask(ChatRequest(
+        text=question, session_id="cli", product_mode="general_guide",
+    )):
         if event.type == "answer" and event.response is not None:
             print(ResponseFormatter().format_text(event.response))
         elif event.type == "error":

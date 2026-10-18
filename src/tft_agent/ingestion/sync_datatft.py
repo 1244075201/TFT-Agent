@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from tft_agent.core.config import Settings
+from tft_agent.core.update_state import database_lease
 from tft_agent.ingestion.sources.datatft import DataTFTSource, RawHTTPResponse
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
@@ -28,6 +29,17 @@ async def sync(
     requested_patch: str | None = None,
     set_number: int | None = None,
     set_name: str | None = None,
+    activate: bool = True,
+) -> tuple[str, int]:
+    async with database_lease(database):
+        return await _sync(input_path, database, settings, requested_patch,
+                           set_number, set_name, activate)
+
+
+async def _sync(
+    input_path: Path | None, database: Path, settings: Settings,
+    requested_patch: str | None, set_number: int | None, set_name: str | None,
+    activate: bool,
 ) -> tuple[str, int]:
     repository = SQLiteGameDataRepository(database.resolve())
     await repository.initialize()
@@ -96,21 +108,24 @@ async def sync(
         snapshot_id, _created = await repository.store_candidate_snapshot(
             metadata, records, payload, sync_id, response_ids, raw_status
         )
-        await repository.rebuild_canonical_catalog(
-            detected_patch, selected_set_number, selected_set_name, (), (), snapshot_id
-        )
-        await repository.resolve_datatft_normalized_entities(
-            snapshot_id, detected_patch, selected_set_number
-        )
-        previous_snapshot_id = (
-            current.active_snapshot_id if current.set_number == selected_set_number else ""
-        )
-        warnings = await _validate(repository, previous_snapshot_id, records)
+        warnings = await _validate(repository, current.active_snapshot_id, records)
+        if not activate:
+            await repository.update_sync_run(
+                sync_id, "validated", detected_patch=detected_patch,
+                snapshot_id=snapshot_id, warnings=[*warnings, "server_version_unverified"],
+            )
+            return snapshot_id, len(records)
+        if not _created and current.active_snapshot_id == snapshot_id:
+            await repository.update_sync_run(
+                sync_id, "activated", detected_patch=detected_patch,
+                snapshot_id=snapshot_id, warnings=["unchanged_content"],
+            )
+            return snapshot_id, len(records)
         await repository.update_sync_run(
             sync_id, "validated", detected_patch=detected_patch,
             snapshot_id=snapshot_id, warnings=warnings,
         )
-        await repository.activate_snapshot(
+        await repository.publish_snapshot(
             detected_patch, selected_set_number, selected_set_name,
             snapshot_id, sync_id, warnings,
         )

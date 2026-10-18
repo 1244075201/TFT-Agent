@@ -351,3 +351,13 @@ async def test_v2_storage_read_api_and_v1_compatibility(tmp_path: Path) -> None:
             "ORDER BY canonical_format_version"
         ).fetchall() == [("v1", 1), ("v2", 2)]
         assert connection.execute("SELECT COUNT(*) FROM datatft_comp_conditions").fetchone() == (0,)
+
+
+def test_new_replacement_encoding_preserves_the_next_board_position() -> None:
+    decoded = decode_team_url(
+        "https://www.datatft.com/simulator/AAA_ABHABs18", _catalog()
+    )
+    assert decoded["issues"] == []
+    assert [unit["board_index"] for unit in decoded["units"]] == [0, 7]
+    assert decoded["units"][0]["replace_id"] == "918002"
+    assert decoded["units"][1]["external_hero_id"] == "918002"

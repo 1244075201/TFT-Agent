@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from tft_agent.core.config import Settings
+from tft_agent.core.update_state import UpdateState
 from tft_agent.tft_mcp_server.repositories.sqlite_game_data_repository import (
     SQLiteGameDataRepository,
 )
@@ -29,6 +30,16 @@ class PatchService:
         self._settings = settings
 
     async def active_context(self) -> ActivePatchContext:
+        server = UpdateState(self._settings.database_path).server()
+        if server and server.game_patch:
+            current = await self._repository.patch_context(server.game_patch)
+            if current and current.active_snapshot_id:
+                return current
+            return ActivePatchContext(
+                game_patch=server.game_patch, patch_family=patch_family(server.game_patch),
+                set_number=int(server.game_patch.split(".")[0]),
+                set_name=self._settings.current_set_name, active_snapshot_id="",
+            )
         context = await self._repository.active_patch_context()
         if context is None:
             context = await self._repository.bootstrap_patch_registry(

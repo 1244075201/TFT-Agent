@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     datatft_stale_hours: int = Field(default=48, ge=1, le=720)
     datatft_request_interval_seconds: float = Field(default=0.75, ge=0.25, le=10)
     experimental_live_enabled: bool = False
+    knowledge_refresh_hours: int = Field(default=24, ge=1, le=168)
+    data_refresh_enabled: bool = True
+    data_refresh_hours: int = Field(default=24, ge=1, le=168)
+    server_version_urls: list[str] = Field(default_factory=list)
+    knowledge_web_enabled: bool = True
+    knowledge_search_api_key: SecretStr | None = None
+    knowledge_web_timeout_seconds: float = Field(default=8, ge=1, le=30)
+    knowledge_allowed_domains: list[str] = Field(default_factory=lambda: [
+        "teamfighttactics.leagueoflegends.com", "lol.qq.com", "datatft.com",
+        "lolchess.gg", "tactics.tools", "metatft.com", "tftacademy.com",
+    ])
     deepseek_api_key: SecretStr | None = Field(
         default=None,
         validation_alias="DEEPSEEK_API_KEY",

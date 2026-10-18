@@ -5,13 +5,17 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any
 
 from tft_agent.agent.parser import GameStateParser
 from tft_agent.agent.state import AgentMessage, AgentState
 from tft_agent.app.aliases import EntityTextNormalizer
+from tft_agent.app.citations import attach_citations
+from tft_agent.app.data_updates import DataUpdateCoordinator
 from tft_agent.app.entity_resolution import CanonicalEntityResolver, ResolvedEntity
+from tft_agent.app.live_knowledge import LiveKnowledge
 from tft_agent.app.pipeline import (
     AnswerContext,
     ChampionCompositionMatch,
@@ -51,6 +55,7 @@ from tft_agent.app.semantic_retrieval import (
     SemanticRetrievalPlan,
     is_semantic_discovery_query,
     is_state_aware_strategy_query,
+    safe_fallback_plan,
 )
 from tft_agent.app.session_scope import session_scope
 from tft_agent.core.config import Settings
@@ -64,6 +69,7 @@ from tft_agent.core.schemas import (
     FinalResponse,
     GameState,
 )
+from tft_agent.core.update_state import UpdateState, database_lease
 from tft_agent.desktop.catalog import CanonicalEntityCatalog, CompositionCard
 from tft_agent.llm.grounded_decision import (
     GroundedDecisionClient,
@@ -87,6 +93,15 @@ class AgentService:
         self._general_guide_resets: set[str] = set()
         self._strategy_turn_states: dict[str, StrategyTurnState] = {}
         self.last_trace: RetrievalTrace | None = None
+        self.live_knowledge = LiveKnowledge(self.settings)
+        self.data_updates = DataUpdateCoordinator(self.settings, self.live_knowledge)
+        self._guide_topics: dict[str, tuple[str, str]] = {}
+
+    def start_knowledge_refresh(self) -> None:
+        self.data_updates.start()
+
+    def stop_knowledge_refresh(self) -> None:
+        self.data_updates.stop()
 
     def _repo(self) -> SQLiteGameDataRepository:
         if self._repository is None:
@@ -129,22 +144,33 @@ class AgentService:
         if not self.settings.database_path.resolve().is_file():
             return "DataTFT：尚未同步"
         await self._context()
+        updates = UpdateState(self.settings.database_path)
+        server = updates.server()
+        check = updates.get("server_check")
+        refresh = updates.get("refresh")
+        prefix = f"服务器：{server.game_patch}" if server else "服务器版本状态待核验"
+        if check and check.get("status") != "confirmed":
+            prefix += "（最新状态待核验）"
+        suffix = (f"｜最近成功：{refresh.get('last_success', '无')}"
+                  f"｜{refresh.get('error') or refresh.get('status', '尚未检查')}")
         latest = await self._repo().latest_datatft_snapshot()
         if latest is None:
-            return "DataTFT：尚未同步"
+            return prefix + "｜DataTFT：尚未同步" + suffix
         metadata, count = latest
-        return (f"版本：{metadata.game_patch}｜DataTFT：已同步 {count} 套阵容｜"
+        return (prefix + f"｜数据版本：{metadata.game_patch}｜DataTFT：已同步 {count} 套阵容｜"
                 f"更新时间：{metadata.retrieved_at.astimezone():%Y-%m-%d %H:%M}｜"
-                f"状态：{metadata.status.value}")
+                f"状态：{metadata.status.value}" + suffix)
 
     async def clear_session(self, session_id: str) -> None:
         await self._repo().clear_session(session_id)
         self._strategy_turn_states.pop(session_id, None)
+        self._guide_topics.pop(session_id, None)
 
     async def clear_product_session(self, session_id: str, product_mode: ProductMode) -> None:
         scope = session_scope(session_id, product_mode)
         await self._repo().clear_session(scope.session_id)
         self._strategy_turn_states.pop(scope.session_id, None)
+        self._guide_topics.pop(scope.session_id, None)
         if product_mode == ProductMode.GENERAL_GUIDE:
             self._general_guide_resets.add(scope.session_id)
 
@@ -206,6 +232,36 @@ class AgentService:
         ) for record, display_cores in zip(records, core_units, strict=True)]
 
     async def ask(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        async with database_lease(self.settings.database_path):
+            async for event in self._ask_pinned(request):
+                if event.type == "answer" and event.response:
+                    evidence = (self.last_trace.retrieved_knowledge.evidence
+                                if self.last_trace else [])
+                    response = attach_citations(event.response, evidence)
+                    update_state = UpdateState(self.settings.database_path)
+                    server = update_state.server()
+                    check = update_state.get("server_check")
+                    if check and check.get("status") != "confirmed":
+                        response = response.model_copy(update={
+                            "recommendation": response.recommendation
+                            + "\n\n国服版本自动核验尚未确认当前版本（"
+                            + str(check.get("reason") or "尚未取得充分的官方生效依据")
+                            + "）；以上依据标注版本的资料，"
+                            "不保证代表服务器当前强度。",
+                        })
+                    if (server and self._active_context
+                            and not self._active_context.active_snapshot_id):
+                        note = (f"国服已核验版本为 {server.game_patch}；DataTFT 对应快照尚未就绪，"
+                                "旧版本阵容资料未用于本次回答。")
+                        response = response.model_copy(update={
+                            "recommendation": response.recommendation + "\n\n" + note,
+                        })
+                    event = event.model_copy(update={
+                        "response": response, "message": response.recommendation,
+                    })
+                yield event
+
+    async def _ask_pinned(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         active_context = await self._context()
         if (
             request.mode == ChatMode.EXPERIMENTAL_LIVE
@@ -275,6 +331,13 @@ class AgentService:
             preliminary_understanding = understand_query(
                 request.text, state, product_mode, resolution
             )
+            guide_planning = (
+                product_mode == ProductMode.GENERAL_GUIDE
+                and structured_composition_list_limit(request.text) is None
+                and preliminary_understanding.knowledge_intent not in {
+                    KnowledgeIntent.ENTITY_FACT, KnowledgeIntent.GENERAL_KNOWLEDGE,
+                }
+            )
             semantic_discovery = (
                 not potential_strategy_followup
                 and structured_composition_list_limit(request.text) is None
@@ -296,7 +359,7 @@ class AgentService:
                     request.text, {item.entity_type for item in resolution.entities}
                 )
             )
-            retrieval_first = retrieval_first or semantic_discovery or state_aware
+            retrieval_first = retrieval_first or semantic_discovery or state_aware or guide_planning
             strategy_state_inherited = bool(
                 potential_strategy_followup
                 and previous_strategy
@@ -435,19 +498,50 @@ class AgentService:
             state = apply_state_mutation(state, understanding, request.text)
             entity_end = perf_counter()
             planner_outcome: PlannerOutcome | None = None
-            if semantic_discovery or state_aware:
+            if semantic_discovery or state_aware or guide_planning:
                 planner = RetrievalPlannerClient(self.settings)
+                planner_query = request.text
+                previous_topic = self._guide_topics.get(scope.session_id)
+                if (guide_planning and previous_topic
+                        and previous_topic[0] == active_context.game_patch):
+                    planner_query = (
+                        f"前文话题（仅用于省略理解，不是当前持有状态）：{previous_topic[1]}\n"
+                        f"当前问题：{request.text}"
+                    )
                 try:
                     planner_outcome = (
                         await planner.plan(
-                            request.text, state if scope.uses_game_state else None,
+                            planner_query, state if scope.uses_game_state else None,
                             state_aware=True,
                         ) if state_aware else await planner.plan(
-                            request.text, state if scope.uses_game_state else None,
+                            planner_query, state if scope.uses_game_state else None,
                         )
+                    )
+                except Exception:
+                    planner_outcome = PlannerOutcome(
+                        plan=safe_fallback_plan(), model=self.settings.model,
+                        latency_ms=0, used_fallback=True,
+                        validation_error="语义规划暂时不可用，使用原问题与已识别名称检索。",
                     )
                 finally:
                     await planner.close()
+                if guide_planning and not scope.uses_game_state:
+                    planner_outcome.plan = planner_outcome.plan.model_copy(
+                        update={"observed_state": [request.text] if state_aware else []}
+                    )
+                    if not planner_outcome.used_fallback:
+                        unresolved_attempt = (
+                            "、".join(planner_outcome.plan.unknown_names) or None
+                        )
+                    if (not resolution.entities and not potential_strategy_followup
+                            and not state_aware and not planner_outcome.used_fallback
+                            and not planner_outcome.plan.unknown_names):
+                        semantic_discovery = True
+            effective_query = request.text
+            topic = self._guide_topics.get(scope.session_id)
+            if (guide_planning and planner_outcome and planner_outcome.plan.followup
+                    and topic and topic[0] == active_context.game_patch):
+                effective_query = f"{topic[1][-400:]}\n追问：{request.text}"
             plan = build_retrieval_plan(
                 understanding, state, active_context.game_patch,
                 active_context.set_number, active_context.set_name,
@@ -465,6 +559,7 @@ class AgentService:
             )
             scenario_evidence: dict[str, list[str]] = {}
             conditional_state: StrategyTurnState | None = None
+            unverified_combination: list[str] = []
             if conditional_followup and previous_strategy:
                 knowledge, calls, structured_metadata, scenario_evidence = (
                     await self._retrieve_conditional(previous_strategy, plan)
@@ -523,7 +618,94 @@ class AgentService:
                 )
             else:
                 knowledge, calls = await self._retrieve(request.text, plan)
+            if guide_planning and planner_outcome:
+                semantic = planner_outcome.plan
+                # Named and emerging combinations get semantic retrieval too. Existing
+                # structured/conditional routes remain authoritative for their facts.
+                if ((not semantic_discovery or effective_query != request.text)
+                        and not conditional_followup and not initial_conditional):
+                    queries = list(dict.fromkeys([
+                        effective_query, *semantic.strategy_searches,
+                        *semantic.mentioned_entities, *semantic.unknown_names,
+                        *semantic.relationships,
+                    ]))
+                    extra, extra_calls, _ = await self._retrieve_broad_strategy(
+                        queries, _structured_seed_records(resolution.entities), plan,
+                    )
+                    existing = {item.evidence_id for item in knowledge.evidence}
+                    knowledge.evidence.extend(
+                        item for item in extra.evidence if item.evidence_id not in existing
+                    )
+                    calls.extend(extra_calls)
+                    retrieval_queries.extend(queries)
+                anchors = list(dict.fromkeys(
+                    [item.display_name for item in resolution.entities]
+                    or semantic.mentioned_entities or semantic.unknown_names
+                ))
+                local_strategy = any(item.section in {
+                    "core", "early_game", "mid_game", "late_game", "tips", "tip",
+                    "starting_conditions", "strategy",
+                } for item in knowledge.evidence)
+                latest = await self._repo().latest_datatft_snapshot()
+                stale = latest is None or (
+                    datetime.now(UTC) - latest[0].retrieved_at
+                    >= timedelta(hours=self.settings.knowledge_refresh_hours)
+                )
+                needs_search = (not local_strategy or bool(knowledge.knowledge_gaps)
+                                or bool(semantic.unknown_names)
+                                or (semantic.freshness_required and stale))
+                if anchors and not any(
+                    item.section in {"core", "early_game", "mid_game", "late_game",
+                                     "tips", "tip", "starting_conditions", "strategy"}
+                    and all(name in item.display_name + " " + str(item.semantic_content)
+                            for name in anchors)
+                    for item in knowledge.evidence
+                ):
+                    # Individually known entities do not establish their combined build.
+                    needs_search = True
+                web_started = perf_counter()
+                web = await asyncio.to_thread(
+                    self.live_knowledge.lookup, effective_query, plan.game_patch, anchors,
+                    needs_search=needs_search,
+                    concepts=semantic.strategy_searches,
+                )
+                knowledge.evidence.extend(web.evidence)
+                knowledge.knowledge_gaps.extend(web.gaps)
+                calls.append(RepositoryCall(
+                    operation="live_knowledge", filters={"status": web.status,
+                                                        "needs_search": needs_search,
+                                                        "rejections": web.rejections},
+                    result_count=len(web.evidence), latency_ms=(perf_counter()-web_started)*1000,
+                ))
+                # Local relation gaps describe only the local catalog, not web evidence.
+                if web.evidence:
+                    knowledge.knowledge_gaps = [gap for gap in knowledge.knowledge_gaps
+                        if not gap.startswith("recognized entities lack exact relation:")]
+                kinds = {item.entity_type for item in resolution.entities}
+                if (not web.evidence and kinds & {"trait", "emblem"}
+                        and kinds & {"champion", "augment"}
+                        and not initial_conditional and not conditional_followup
+                        and not any(
+                            item.section in {"core", "early_game", "mid_game", "late_game",
+                                             "tips", "tip", "starting_conditions", "strategy"}
+                            and all(name in item.display_name + " " + str(item.semantic_content)
+                                    for name in anchors)
+                            for item in knowledge.evidence
+                        )):
+                    unverified_combination = anchors
+                self._guide_topics[scope.session_id] = (plan.game_patch, effective_query)
             calls = [*champion_calls, *calls]
+            # Older repository paths may offer family/unversioned fallbacks. They are
+            # historical evidence, never current-patch recommendation material.
+            knowledge.evidence = [item for item in knowledge.evidence
+                                  if item.source_patch == plan.game_patch
+                                  and item.patch_match == "exact"]
+            latest_metadata = await self._repo().latest_datatft_snapshot()
+            if latest_metadata:
+                metadata = latest_metadata[0]
+                for item in knowledge.evidence:
+                    if item.snapshot_id == metadata.snapshot_id and not item.retrieved_at:
+                        item.retrieved_at = metadata.retrieved_at.isoformat()
             retrieval_end = perf_counter()
             history = [] if retrieval_first else _relevant_history(history_rows, understanding)
             gaps = context_gaps(state) if scope.uses_game_state else []
@@ -533,10 +715,12 @@ class AgentService:
                 context_gaps=gaps, knowledge_gaps=knowledge.knowledge_gaps,
                 retrieval_first=retrieval_first,
                 previous_topic=(previous_strategy.raw_query
-                                if strategy_state_inherited and previous_strategy else None),
+                                if strategy_state_inherited and previous_strategy else
+                                topic[1] if effective_query != request.text and topic else None),
                 current_candidates=inherited_candidates,
                 retrieval_interpretation=(
-                    planner_outcome.plan.user_goal if planner_outcome else None
+                    json.dumps(planner_outcome.plan.model_dump(mode="json"), ensure_ascii=False)
+                    if planner_outcome else None
                 ),
                 observed_state=(planner_outcome.plan.observed_state
                                 if planner_outcome else []),
@@ -554,6 +738,7 @@ class AgentService:
                 scenario_evidence=scenario_evidence,
                 evidence_strength={item.evidence_id: _evidence_strength(item)
                                    for item in knowledge.evidence},
+                unverified_combination=unverified_combination,
             )
             context_summary = context.readable_summary()
             context_end = perf_counter()
@@ -672,6 +857,14 @@ class AgentService:
             payload = trace.model_dump(mode="json")
             yield ChatEvent(type="status", message="检索完成", retrieval_plan=payload,
                             context_gaps=[*gaps, *knowledge.knowledge_gaps])
+            if (guide_planning and planner_outcome and planner_outcome.plan.clarification
+                    and not knowledge.evidence):
+                answer = FinalResponse(recommendation=planner_outcome.plan.clarification)
+                await self._record_answer(request, answer, scope.session_id)
+                trace.llm_call_count = 1
+                yield ChatEvent(type="answer", message=answer.recommendation, response=answer,
+                                retrieval_plan=trace.model_dump(mode="json"), llm_call_count=1)
+                return
             if not retrieval_first and not initial_conditional and (
                 understanding.kind == QueryKind.DETERMINISTIC_LOOKUP
                 or understanding.resolution_category
@@ -696,6 +889,25 @@ class AgentService:
             catalog = await self._repo().grounding_entity_catalog()
             grounding = enforce_closed_world_grounding(outcome, context, catalog)
             outcome = grounding.outcome
+            outcome = type(outcome)(
+                response=attach_citations(outcome.response, knowledge.evidence),
+                options=outcome.options,
+            )
+            if guide_planning:
+                web_sources = {item.url for item in knowledge.evidence
+                               if item.section == "web_strategy"}
+                notices = list(dict.fromkeys(
+                    gap for gap in knowledge.knowledge_gaps
+                    if gap.startswith(("联网", "未找到版本", "最近一次补查", "部分攻略",
+                                       "搜索服务", "发现来源标注版本"))
+                ))
+                if len(web_sources) == 1:
+                    notices.append("新玩法补充依据单篇来源，证据有限，不代表统计排名。")
+                if notices:
+                    outcome = type(outcome)(response=outcome.response.model_copy(update={
+                        "recommendation": outcome.response.recommendation + "\n\n"
+                        + "\n".join(notices),
+                    }), options=outcome.options)
             trace.llm_call_count = 1
             if planner_outcome:
                 trace.llm_call_count += 1
@@ -1886,7 +2098,7 @@ def _deterministic_answer(
     if understanding and understanding.unresolved_terms:
         terms = "、".join(understanding.unresolved_terms)
         return FinalResponse(
-            recommendation=f"当前版本实体目录无法唯一识别“{terms}”。请补充完整阵容、棋子、装备或强化名称。",
+            recommendation=f"暂时无法确认“{terms}”指哪种玩法，请补充相关棋子或强化名称。",
             used_tools=["canonical_entity_registry"],
         )
     relation_gaps = [gap for gap in knowledge.knowledge_gaps
@@ -1896,9 +2108,8 @@ def _deterministic_answer(
             item.display_name for item in understanding.resolved_entities
         ))
         return FinalResponse(
-            recommendation=(f"已识别到实体：{names}。但当前版本 {patch} 的证据没有建立"
-                            "这些实体之间的阵容玩法 relation，因此无法给出确定玩法；"
-                            "我不会补造候选路线、适配结论或优先级。"),
+            recommendation=(f"已识别到{names}，但尚未找到版本 {patch} 中这套组合的可靠攻略。"
+                            "现有资料不足以确认具体玩法与适用条件。"),
             used_tools=["canonical_entity_registry", "structured_sqlite_retrieval"],
         )
     if (
@@ -1951,8 +2162,8 @@ def _deterministic_answer(
     ) if need in requested), None)
     if missing_label and plan and plan.target_comp:
         return FinalResponse(
-            recommendation=(f"当前版本 {patch} 的 DataTFT exact 数据中，"
-                            f"{plan.target_comp.display_name}没有可用的{missing_label} relation。"),
+            recommendation=(f"当前版本 {patch} 的资料中，"
+                            f"尚未找到{plan.target_comp.display_name}可靠的{missing_label}攻略。"),
             used_tools=["structured_sqlite_retrieval"],
         )
     relevant = [item for item in knowledge.evidence if item.section == "core_units"]

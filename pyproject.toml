@@ -31,6 +31,7 @@ dev = [
 [project.scripts]
 tft-agent = "tft_agent.app.main:main"
 tft-agent-desktop = "tft_agent.desktop.main:main"
+tft-eval-guide-understanding = "tft_agent.evals.guide_understanding_runner:main"
 tft-sync-datatft = "tft_agent.ingestion.sync_datatft:main"
 tft-sync-static-data = "tft_agent.ingestion.sync_static_data:main"
 tft-mcp-server = "tft_agent.tft_mcp_server.server:main"

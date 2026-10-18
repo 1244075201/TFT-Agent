@@ -46,6 +46,14 @@ class SemanticRetrievalPlan(StrictModel):
     """Provider-produced intent only; patch and repository details are deliberately absent."""
 
     user_goal: str = Field(min_length=1, max_length=240)
+    preferences: list[str] = Field(default_factory=list, max_length=8)
+    constraints: list[str] = Field(default_factory=list, max_length=8)
+    mentioned_entities: list[str] = Field(default_factory=list, max_length=12)
+    unknown_names: list[str] = Field(default_factory=list, max_length=8)
+    relationships: list[str] = Field(default_factory=list, max_length=8)
+    freshness_required: bool = False
+    followup: bool = False
+    clarification: str | None = None
     query_type: DiscoveryQueryType = DiscoveryQueryType.COMPOSITION_DISCOVERY
     observed_state: list[str] = Field(default_factory=list, max_length=8)
     decision_questions: list[str] = Field(default_factory=list, max_length=8)
@@ -212,7 +220,22 @@ class RetrievalPlannerClient:
                     "你是检索规划器，不回答用户问题。只输出JSON检索意图。只能使用以下capabilities："
                     + ", ".join(item.value for item in RetrievalCapability)
                     + "。不得输出patch、SQL、工具名、repository方法、文件或网络操作。"
-                    "如果用户描述现有局面并问下一步，query_type=state_aware_strategy；"
+                    "对所有攻略问句先理解目标、偏好、限制和组合关系，不要求玩法已存在于实体目录。"
+                    "preferences记录玩法偏好，constraints记录限制（含否定），mentioned_entities记录"
+                    "提及名称，unknown_names记录待查的新称呼，relationships记录组合或依赖关系。"
+                    "‘专属海克斯’是描述，不是未知实体；‘魔女专属海克斯黑暗仪式’指魔女与黑暗仪式"
+                    "的玩法关系。询问某强化不代表玩家持有它。攻略条件不能写成observed_state。"
+                    "‘上限高’偏向成型潜力与吃鸡；‘吃烂分’偏向稳定名次和降低出局风险；"
+                    "‘赌狗’指追三星搜牌玩法，未明确低费时不能自动限制费用。"
+                    "例：‘什么赌狗能吃烂分’只检索追三星与稳定名次，费用上下界都为null；"
+                    "只有‘低费赌狗’才额外筛费用。偏好追三星不能推导‘低费主核’限制。"
+                    "这些是目标不是已证实的胜率。按语境改写检索词，不编造排名或强度。"
+                    "‘现在/强势/最新’等时效问题令freshness_required=true。followup表示依赖前文的"
+                    "省略问题；前文仅用于确定话题，当前否定覆盖旧条件。"
+                    "clarification仅在确有影响回答的歧义时填写，否则null。未知新玩法先检索不追问。"
+                    "输入state_aware由应用确定路由：false必须返回composition_discovery，"
+                    "true必须返回state_aware_strategy，不要因‘怎么玩’或强化名称自行切换。"
+                    "例：‘某羁绊专属海克斯某强化怎么玩’是攻略查询，不是已持有强化的局面决策。"
                     "observed_state只记用户明确说出的状态，decision_questions列出要判断的分支。"
                     "strategy_searches使用短的可检索运营概念，覆盖经济、升级、搜牌、"
                     "保血、阶段和条件式攻略；requested_fields优先mid_game、late_game、"
@@ -234,6 +257,9 @@ class RetrievalPlannerClient:
                     "反向也成立：任何非空过滤器、search或roster/items字段都必须声明对应"
                     "capability，不得输出不会执行的孤立参数。"
                     "limit为1到12。输出字段必须且只能符合schema。"
+                    "可选新增字段：preferences/constraints/mentioned_entities/unknown_names/"
+                    "relationships均为字符串数组，freshness_required/followup为布尔值，"
+                    "clarification为字符串或null。"
                     "精确JSON形状如下：{\"user_goal\":\"一句检索目标\","
                     "\"query_type\":\"composition_discovery\",\"capabilities\":["
                     "\"LIST_COMPOSITIONS\"],\"observed_state\":[],"
@@ -247,7 +273,8 @@ class RetrievalPlannerClient:
                     "例如暴风之剑、反曲之弓、拳套及相关物理成装；这些词只是检索概念。"
                 )},
                 {"role": "user", "content": json.dumps(
-                    {"query": query, "game_state": state}, ensure_ascii=False
+                    {"query": query, "game_state": state, "state_aware": state_aware},
+                    ensure_ascii=False
                 )},
             ],
             response_format={"type": "json_object"},
@@ -258,6 +285,28 @@ class RetrievalPlannerClient:
             decoded = json.loads(content)
             if not isinstance(decoded, dict):
                 raise ValueError("planner output is not an object")
+            if not state_aware:
+                # A model cannot turn an informational guide into inferred possession.
+                decoded["query_type"] = DiscoveryQueryType.COMPOSITION_DISCOVERY.value
+                decoded["observed_state"] = []
+            relationships = decoded.get("relationships")
+            if isinstance(relationships, list):
+                decoded["relationships"] = [
+                    f"{item['source']} {item['type']} {item['target']}"
+                    if (isinstance(item, dict) and set(item) == {"source", "target", "type"}
+                        and all(isinstance(value, str) for value in item.values()))
+                    else item
+                    for item in relationships
+                ]
+            fields = decoded.get("requested_fields", [])
+            capabilities = decoded.get("capabilities", [])
+            if isinstance(fields, list) and isinstance(capabilities, list):
+                for capability, field_name in (
+                    ("GET_COMPOSITION_ITEMS", "items"), ("GET_COMPOSITION_ROSTER", "roster"),
+                ):
+                    if capability in capabilities and field_name not in fields:
+                        fields.append(field_name)
+                decoded["requested_fields"] = fields
             plan = validate_plan_payload(decoded)
             if state_aware and plan.query_type != DiscoveryQueryType.STATE_AWARE_STRATEGY:
                 raise ValueError("planner did not represent the state-aware decision")

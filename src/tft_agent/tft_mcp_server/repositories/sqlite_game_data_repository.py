@@ -5,9 +5,10 @@ import json
 import re
 import sqlite3
 from collections.abc import Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from tft_agent.tft_mcp_server.repositories.migrations import apply_migrations
 from tft_agent.tft_mcp_server.schemas import (
@@ -22,6 +23,16 @@ from tft_agent.tft_mcp_server.schemas import (
     StaticEntityRecord,
     TraitInfo,
 )
+
+
+class _PublicationConnection(sqlite3.Connection):
+    """Nested repository scopes must not commit a partially published catalog."""
+
+    def __exit__(self, *args: Any) -> Literal[False]:
+        return False
+
+
+_publication: ContextVar[sqlite3.Connection | None] = ContextVar("publication", default=None)
 
 _OPEN_QUERY_STOP_WORDS = {
     "我", "现在", "当前", "该", "怎么", "怎么玩", "怎么办", "干嘛", "下一步",
@@ -555,10 +566,48 @@ class SQLiteGameDataRepository:
         return records
 
     def _connect(self) -> sqlite3.Connection:
+        publication = _publication.get()
+        if publication is not None:
+            return publication
         connection = sqlite3.connect(self._database_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    async def publish_snapshot(
+        self, game_patch: str, set_number: int, set_name: str,
+        snapshot_id: str, sync_id: str, warnings: list[str],
+    ) -> ActivePatchContext:
+        return await asyncio.to_thread(
+            self._publish_snapshot_sync, game_patch, set_number, set_name,
+            snapshot_id, sync_id, warnings,
+        )
+
+    def _publish_snapshot_sync(
+        self, game_patch: str, set_number: int, set_name: str,
+        snapshot_id: str, sync_id: str, warnings: list[str],
+    ) -> ActivePatchContext:
+        connection = sqlite3.connect(self._database_path, factory=_PublicationConnection)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        token = _publication.set(connection)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._rebuild_canonical_catalog_sync(
+                game_patch, set_number, set_name, [], [], snapshot_id,
+            )
+            self._resolve_datatft_normalized_entities_sync(snapshot_id, game_patch, set_number)
+            result = self._activate_snapshot_sync(
+                game_patch, set_number, set_name, snapshot_id, sync_id, warnings,
+            )
+            connection.commit()
+            return result
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            _publication.reset(token)
+            connection.close()
 
     def _initialize_sync(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1149,7 +1198,8 @@ class SQLiteGameDataRepository:
         self, snapshot_id: str, game_patch: str, set_number: int
     ) -> None:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             for table, key_column, canonical_column, kinds in (
                 (
                     "datatft_item_identities",
@@ -1437,7 +1487,8 @@ class SQLiteGameDataRepository:
 
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             snapshot = connection.execute(
                 "SELECT game_patch FROM datatft_snapshots WHERE snapshot_id=? AND status='valid'",
                 (snapshot_id,),
@@ -1503,6 +1554,8 @@ class SQLiteGameDataRepository:
                 (game_patch,),
             ).fetchone()
         snapshot_clause = ""
+        if registered is not None and not registered["active_snapshot_id"]:
+            return []
         if registered is not None and registered["active_snapshot_id"]:
             snapshot_clause = " AND s.snapshot_id = ?"
             parameters.append(registered["active_snapshot_id"])
@@ -1767,7 +1820,10 @@ class SQLiteGameDataRepository:
                 return {"evidence": [], "candidate_comps": []}
             comps = connection.execute(
                 "SELECT comp_id,name,tier,source_response_id FROM datatft_comps "
-                "WHERE snapshot_id=? ORDER BY name", (snapshot_id,),
+                "WHERE snapshot_id=? ORDER BY "
+                + ("CASE tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 "
+                   "WHEN 'C' THEN 3 ELSE 4 END, " if "tier" in requested_fields else "")
+                + "name", (snapshot_id,),
             ).fetchall()
             candidates: list[dict[str, object]] = []
             evidence: list[dict[str, object]] = []
@@ -2346,7 +2402,8 @@ class SQLiteGameDataRepository:
         snapshot_id: str | None = None,
     ) -> None:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "DELETE FROM entity_aliases WHERE game_patch=? AND set_number=?",
                 (game_patch, set_number),

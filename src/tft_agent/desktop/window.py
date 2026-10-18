@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -47,7 +47,9 @@ class WorkspaceNavigation(QWidget):
         layout.addWidget(self.guide)
         layout.addWidget(self.match)
         layout.addStretch()
-        layout.addWidget(QLabel(data_status))
+        self.data_status = QLabel(data_status)
+        self.data_status.setWordWrap(True)
+        layout.addWidget(self.data_status)
         layout.addWidget(QLabel("设置 / 关于"))
         self.setFixedWidth(170)
 
@@ -80,6 +82,8 @@ class DesktopMainWindow(QMainWindow):
         header = QLabel(
             f"<h2>云顶数据指导 Agent</h2>Set {set_number} · Patch {game_patch}"
         )
+        self.header = header
+        self.displayed_context = active
         self.navigation = WorkspaceNavigation(data_status)
         self.guide_page = GuideChatPage(game_patch, cards)
         self.match_page = MatchGuidancePage(catalog)
@@ -95,11 +99,32 @@ class DesktopMainWindow(QMainWindow):
         layout.addLayout(body, 1)
         self.setCentralWidget(root)
         self._connect_signals()
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(10000)
+        self.update_timer.timeout.connect(self._refresh_data_status)
+        self.update_timer.start()
         try:
             state = asyncio.run(self.service.load_game_state("desktop-match"))
             self.match_page.set_game_state(state)
         except Exception:
             self.match_page.set_game_state(GameState())
+
+    def _refresh_data_status(self) -> None:
+        if self.controller.busy or self.service.data_updates.lock.locked():
+            return
+        try:
+            self.navigation.data_status.setText(asyncio.run(self.service.data_status()))
+            context = self.service.active_context
+            if context and context != self.displayed_context:
+                cards = asyncio.run(self.service.composition_cards())
+                self.guide_page.update_catalog(context.game_patch, cards)
+                self.header.setText(
+                    f"<h2>云顶数据指导 Agent</h2>Set {context.set_number} "
+                    f"· Patch {context.game_patch}"
+                )
+                self.displayed_context = context
+        except Exception:
+            self.navigation.data_status.setText("数据更新状态暂不可用")
 
     def _connect_signals(self) -> None:
         self.navigation.workspace_selected.connect(self.stack.setCurrentIndex)

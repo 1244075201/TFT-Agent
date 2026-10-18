@@ -128,7 +128,7 @@ async def test_semantic_query_invokes_planner_and_uses_active_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_explicit_strategy_and_fact_do_not_invoke_planner(
+async def test_explicit_strategy_uses_planner_but_factual_browse_does_not(
     settings: Settings, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(service_module, "RetrievalPlannerClient", _Planner)
@@ -137,17 +137,17 @@ async def test_explicit_strategy_and_fact_do_not_invoke_planner(
     service = AgentService(settings)
     await _ask(service, "主宰转怎么运营", "control-strategy")
     assert service.last_trace is not None
-    assert service.last_trace.planner_invoked is False
-    assert service.last_trace.llm_call_count == 1
+    assert service.last_trace.planner_invoked is True
+    assert service.last_trace.llm_call_count == 2
     await _ask(service, "推荐20套阵容", "control-fact")
     assert service.last_trace is not None
     assert service.last_trace.planner_invoked is False
     assert service.last_trace.llm_call_count == 0
-    assert _Planner.calls == 0
+    assert _Planner.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_semantic_candidates_support_followup_without_second_planner(
+async def test_semantic_candidates_support_followup_with_refreshed_intent(
     settings: Settings, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(service_module, "RetrievalPlannerClient", _Planner)
@@ -161,9 +161,9 @@ async def test_semantic_candidates_support_followup_without_second_planner(
     second = service.last_trace
     assert second is not None
     assert second.strategy_state_inherited is True
-    assert second.planner_invoked is False
-    assert second.llm_call_count == 1
-    assert _Planner.calls == 1
+    assert second.planner_invoked is True
+    assert second.llm_call_count == 2
+    assert _Planner.calls == 2
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,9 @@ def test_closed_world_allows_only_statistics_present_in_evidence() -> None:
         evidence_id="stats", source="test", requested_patch="18.2", source_patch="18.2",
         patch_match="exact", entity_type="composition", canonical_entity_id="comp-1",
         display_name="测试阵容", section="composition",
-        semantic_content={"top4_rate": "63.7%"}, relevance_score=1, url="test",
+        semantic_content={"top4_rate": "63.7%", "sample_size": 10000,
+                          "sampling_window": "2026-09-20/2026-09-21"},
+        evidence_kind="statistical_result", relevance_score=1, url="test",
     )
     context = AnswerContext(
         question="表现如何",
@@ -367,3 +369,5 @@ def test_closed_world_allows_only_statistics_present_in_evidence() -> None:
         "display_name": "测试阵容", "aliases": [], "entity_type": "composition",
     }])
     assert result.used_fallback is False
+    evidence.semantic_content.pop("sample_size")
+    assert enforce_closed_world_grounding(safe, context, []).used_fallback

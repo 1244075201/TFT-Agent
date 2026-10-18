@@ -81,11 +81,11 @@ async def test_other_routes_reuses_previous_master_candidate_set(
     assert second.inherited_candidate_ids == expected
     assert set(expected) <= evidence_ids
     assert second.retrieved_knowledge.evidence
-    assert second.llm_call_count == 1
+    assert second.planner_invoked and second.llm_call_count == 2
     assert "PREVIOUS TOPIC" in second.clean_context_summary
     assert "CURRENT CANDIDATES" in second.clean_context_summary
     assert "no relevant evidence found" not in second.knowledge_gaps
-    assert events[-1].message == "基于当前重新检索的候选证据回答。"
+    assert events[-1].message.startswith("基于当前重新检索的候选证据回答。")
 
 
 @pytest.mark.asyncio
@@ -106,7 +106,7 @@ async def test_ordinal_followup_retrieves_second_ashe_candidate(
     assert second.strategy_state_inherited is True
     assert second.inherited_candidate_ids == [candidate_ids[1]]
     assert evidence_ids == {candidate_ids[1]}
-    assert second.llm_call_count == 1
+    assert second.planner_invoked and second.llm_call_count == 2
 
 
 @pytest.mark.asyncio

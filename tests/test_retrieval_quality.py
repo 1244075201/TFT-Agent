@@ -233,8 +233,8 @@ async def test_composition_canonical_name_outranks_cross_type_alias_generically(
                  "display_name": "暗影英雄", "aliases": ["夜行者"]},
             ]
 
-    resolver = CanonicalEntityResolver(  # type: ignore[arg-type]
-        CollisionCatalog(),
+    resolver = CanonicalEntityResolver(
+        CollisionCatalog(),  # type: ignore[arg-type]
         Settings(current_game_patch="18.2", current_set_number=18),
     )
     result = await resolver.resolve("夜行者有哪些棋子")
@@ -471,7 +471,7 @@ async def test_explicit_unresolved_entity_blocks_subject_inheritance(
     assert trace.conversational_subject is None
     assert trace.final_resolution_category.value == "resolved_strategy"
     assert trace.retrieval_first_strategy is True
-    assert trace.llm_call_count == 1
+    assert trace.planner_invoked and trace.llm_call_count == 2
     answer = next(event.message for event in events if event.type == "answer")
     assert all(value not in answer for value in forbidden)
 

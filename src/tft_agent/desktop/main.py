@@ -13,6 +13,8 @@ def main() -> None:
 
     app = QApplication([])
     window = DesktopMainWindow()
+    window.service.start_knowledge_refresh()
+    app.aboutToQuit.connect(window.service.stop_knowledge_refresh)
     window.show()
     app.exec()
 

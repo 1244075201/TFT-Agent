@@ -231,7 +231,7 @@ def decode_team_url(url: str, catalog: RuntimeCatalog) -> dict[str, Any]:
             replacement = catalog.heroes_by_code.get(token)
             unit["replace_id"] = replacement.external_id if replacement else None
             unit["replace_key"] = replacement.key if replacement else None
-            if cursor < len(encoded):
+            if cursor < len(encoded) and encoded[cursor].isdigit():
                 cursor += 1  # upstream replacement price marker
         while cursor < len(encoded) and encoded[cursor] == "^":
             cursor += 1

@@ -1,0 +1,16 @@
+{
+  "version": "guide-understanding-v1",
+  "policy": "Human-authored intent targets. These cases do not assert current composition strength. Inspect provider plans manually; never report fixture models as real-model accuracy.",
+  "cases": [
+    {"id":"ceiling","query":"这个版本什么阵容上限比较高","review_target":"成型潜力与吃鸡取向；不等同于已知胜率","freshness_required":true},
+    {"id":"reroll_floor","query":"什么赌狗能吃烂分","review_target":"追三星搜牌玩法与稳定名次；未明确低费，不强行限定费用"},
+    {"id":"reroll_paraphrase","query":"我想追三星，但主要想稳住名次不想搏第一","review_target":"同时保留玩法偏好和稳名次目标"},
+    {"id":"negation","query":"不想赌三星，低费主C有什么能玩","review_target":"低费筛选与不赌三星分别表达；不得要求追三星"},
+    {"id":"emerging_combo","query":"地狱火艾希怎么玩","review_target":"羁绊与英雄组合；不要求既存阵容ID","entities":["地狱火","艾希"]},
+    {"id":"augment_combo","query":"魔女专属海克斯黑暗仪式怎么玩","review_target":"魔女与黑暗仪式组合；专属海克斯不是未知名称，也不代表持有","entities":["魔女","黑暗仪式"]},
+    {"id":"followup_absent","query":"前文话题：魔女专属海克斯黑暗仪式怎么玩\n当前问题：没这个海克斯呢","review_target":"继承魔女话题，检索没有黑暗仪式的独立玩法证据","followup":true},
+    {"id":"followup_rank","query":"前文话题：比较两套已给出的阵容\n当前问题：那哪个更稳","review_target":"继承比较对象，目标转为稳定性，不编造前四率","followup":true},
+    {"id":"freshness","query":"今天新开发出来的阵容有什么，旧攻略别推荐","review_target":"需要新资料，排除过期结论；不能声称已经知道今天强势阵容","freshness_required":true},
+    {"id":"unknown_build","query":"新出的月光流艾希有没有攻略","review_target":"保留待查的新称呼，不虚构实体或玩法；先补查"}
+  ]
+}

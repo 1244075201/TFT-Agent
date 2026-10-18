@@ -143,7 +143,7 @@ async def test_general_strategy_uses_broad_current_patch_retrieval(
         assert any(item.entity_type == "composition"
                    for item in trace.retrieved_knowledge.evidence)
     assert "CURRENT GAMESTATE" not in trace.clean_context_summary
-    assert trace.llm_call_count == 1
+    assert trace.planner_invoked and trace.llm_call_count == 2
 
 
 @pytest.mark.asyncio
@@ -188,7 +188,7 @@ async def test_trait_and_emblem_reverse_retrieval_generate_candidates(
     assert any(item.section in {"starting_conditions", "core", "early_game", "mid_game",
                                 "late_game"}
                for item in trace.retrieved_knowledge.evidence)
-    assert trace.llm_call_count == 1
+    assert trace.planner_invoked and trace.llm_call_count == 2
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_augment_reverse_retrieval_generates_associated_compositions(
     assert any(item.get("relation") == "augment_to_composition"
                for item in trace.structured_expansions)
     assert trace.structured_candidate_comps
-    assert trace.llm_call_count == 1
+    assert trace.planner_invoked and trace.llm_call_count == 2
 
 
 @pytest.mark.asyncio
@@ -270,8 +270,8 @@ async def test_ambiguous_fire_emblem_does_not_pull_unrelated_fallback_comps(
     assert trace.structured_seeds == []
     assert trace.structured_candidate_comps == []
     assert trace.retrieved_knowledge.evidence == []
-    assert trace.knowledge_gaps == [
+    assert trace.knowledge_gaps[:2] == [
         "no relevant evidence found in active normalized knowledge",
         "no unique structured entity seed was resolved; request the full entity name",
     ]
-    assert trace.llm_call_count == 1
+    assert trace.planner_invoked and trace.llm_call_count == 2
