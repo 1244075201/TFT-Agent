@@ -118,6 +118,10 @@ uv run mypy src
 uv run tft-eval-guide-understanding --limit 10
 ```
 
+2026-10-18 本地发布检查：Ruff 通过，mypy 检查 108 个源文件通过；上述离线回归为 **417 passed、12 failed、6 deselected**，并非全绿。失败集中在 `test_query_understanding_polish.py`、`test_retrieval_first_strategy.py` 和 `test_retrieval_quality.py` 的实体解析、阵容候选与上下文断言。本次发布未修改核心代码。
+
+部分回归 fixture 会复制本地 `data/tft.sqlite3`，并依赖特定阵容内容；仓库不分发该数据库。因此，全量回归不是开箱即用的独立测试集，新克隆环境需准备对应数据，导入格式示例不能代替测试所需快照。此处结果仅代表本次本地环境，尚未确认失败属于数据变化还是实现问题。
+
 评测用例位于 `evals/`，运行产物写入被 Git 忽略的 `eval_results/`。结构契约通过率不等于策略正确率；合成截图测试不等于真实游戏视觉准确率。历史验证见 [每日更新与引用验证](docs/data-update-validation-2026-09-22.md) 和 [攻略联调记录](docs/guide-validation-2026-09-22.md)，其结果仅对应记录时的版本与环境。
 
 ## 目录结构
